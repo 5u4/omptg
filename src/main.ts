@@ -295,15 +295,35 @@ log.info("boot.start", {
 	allowed_chats: [...ALLOWED],
 	log_file: logPath(),
 });
-// Initialize OMP's theme system so tools that read theme.status / theme.symbol
-// (e.g. the `ask` tool) have a backing instance instead of an empty stub.
 await initTheme();
 log.info("boot.theme_ready");
+
+// Telegram caches the LAST allowed_updates value per bot token. If a
+// previous run (or any other client using this token) called getUpdates
+// without callback_query, telegram will keep filtering them out until we
+// explicitly re-set the list. We also drop pending updates so an old
+// queued message can't shadow a fresh callback_query.
+try {
+	const info = await bot.api.getWebhookInfo();
+	log.info("boot.webhook_info", {
+		url: info.url,
+		pending_update_count: info.pending_update_count,
+		allowed_updates: info.allowed_updates,
+		last_error_message: info.last_error_message,
+	});
+	if (info.url) {
+		await bot.api.deleteWebhook({ drop_pending_updates: true });
+		log.info("boot.webhook_deleted");
+	}
+} catch (err) {
+	log.warn("boot.webhook_probe_failed", { err: String(err) });
+}
+
 // IMPORTANT: telegram's getUpdates DEFAULT allowed_updates EXCLUDES
-// callback_query. Without listing it explicitly we never receive button
-// taps from inline keyboards — the bot looks alive but UI buttons silently
-// drop. List every update type we care about.
+// callback_query. Pass it explicitly + drop pending so the new list
+// takes effect on the very first poll, ignoring stale state.
 await bot.start({
 	allowed_updates: ["message", "edited_message", "callback_query"],
+	drop_pending_updates: true,
 	onStart: info => log.info("boot.ready", { username: info.username }),
 });
