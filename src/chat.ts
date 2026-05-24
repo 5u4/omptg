@@ -20,6 +20,8 @@ import type {
 import type { Bot } from "grammy";
 import { TelegramStreamer } from "./streamer.ts";
 import { TelegramUI, type PendingUiRequest } from "./ui-bridge.ts";
+import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { scoped } from "./logger.ts";
 
 export interface ChatSessionOptions {
 	chatId: number;
@@ -35,12 +37,19 @@ export class ChatSession {
 	private unsubscribe: (() => void) | undefined;
 	private streamer: TelegramStreamer | undefined;
 	private readonly ui: TelegramUI;
+	private readonly log;
+	/** First user message text in the current session, captured for title gen. */
+	private firstUserText: string | undefined;
+	/** Set once we've attempted (or completed) title generation for the
+	 *  current session; cleared whenever session is recreated. */
+	private titleAttempted = false;
 
 	constructor(opts: ChatSessionOptions) {
 		this.chatId = opts.chatId;
 		this.cwd = opts.cwd;
 		this.bot = opts.bot;
 		this.ui = new TelegramUI(opts.bot, opts.chatId);
+		this.log = scoped(`chat:${opts.chatId}`);
 	}
 
 	get hasSession(): boolean {
@@ -103,11 +112,13 @@ export class ChatSession {
 			try {
 				await this.session.dispose();
 			} catch (err) {
-				console.warn(`[chat ${this.chatId}] dispose failed:`, err);
+				this.log.warn("dispose.failed", { err: String(err) });
 			}
 			this.session = undefined;
 		}
 		this.streamer = undefined;
+		this.firstUserText = undefined;
+		this.titleAttempted = false;
 	}
 
 	private async createFresh(): Promise<AgentSession> {
@@ -137,14 +148,20 @@ export class ChatSession {
 		// Inject our telegram-backed UI before any tool can call into it.
 		setToolUIContext(this.ui, true);
 		this.unsubscribe = session.subscribe(e => this.handleEvent(e));
-		console.log(
-			`[chat ${this.chatId}] session ${session.sessionId} (cwd=${this.cwd})`,
-		);
+		// Resuming a session preloads sessionName; don't try to generate again.
+		this.titleAttempted = Boolean(session.sessionName);
+		this.firstUserText = undefined;
+		this.log.info("session.attached", {
+			session_id: session.sessionId,
+			cwd: this.cwd,
+			name: session.sessionName,
+		});
 	}
 
 	/** Send a user turn. Caller must wait via waitForIdle separately. */
 	async prompt(text: string): Promise<TelegramStreamer> {
 		const s = await this.ensure();
+		if (this.firstUserText === undefined) this.firstUserText = text;
 		const status = await this.bot.api.sendMessage(
 			this.chatId,
 			"✨ thinking…",
@@ -198,9 +215,7 @@ export class ChatSession {
 			}
 			case "notice": {
 				const n = event as { level: string; message: string };
-				console.log(
-					`[chat ${this.chatId}] notice/${n.level}: ${n.message}`,
-				);
+				this.log.info("notice", { level: n.level, message: n.message });
 				break;
 			}
 			case "auto_retry_start": {
@@ -208,9 +223,50 @@ export class ChatSession {
 				s?.pushStatus(`🔄 retry ${ev.attempt}/${ev.maxAttempts}`);
 				break;
 			}
+			case "agent_end": {
+				this.maybeGenerateTitle();
+				break;
+			}
 			default:
 				break;
 		}
+	}
+
+	/** Fire-and-forget title generation after the first agent turn.
+	 *  Uses OMP's built-in title-generator which picks `commit` or `smol`
+	 *  role automatically and writes back via `session.setSessionName`. */
+	private maybeGenerateTitle(): void {
+		if (this.titleAttempted) return;
+		const session = this.session;
+		const first = this.firstUserText;
+		if (!session || !first) return;
+		// Don't overwrite a name that already exists (loaded from a resumed
+		// session or set by `/name` if we add that later).
+		if (session.sessionName) {
+			this.titleAttempted = true;
+			return;
+		}
+		this.titleAttempted = true;
+		const log = this.log;
+		void (async () => {
+			try {
+				const title = await generateSessionTitle(
+					first,
+					session.modelRegistry,
+					session.settings,
+					session.sessionId,
+					session.model,
+				);
+				if (!title) {
+					log.info("title.skipped", { reason: "generator_returned_null" });
+					return;
+				}
+				const ok = await session.setSessionName(title, "auto");
+				log.info("title.set", { title, ok });
+			} catch (err) {
+				log.warn("title.failed", { err: String(err) });
+			}
+		})();
 	}
 }
 

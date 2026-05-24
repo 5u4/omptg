@@ -91,7 +91,7 @@ bot.command("start", ctx =>
 			"send any text to chat with the agent",
 			"/cancel  abort current turn (keeps session)",
 			"/new     start a fresh session in the current cwd",
-			"/sessions  list recent stored sessions for current cwd",
+			"/sessions [n]  list recent stored sessions for current cwd (default 8, max 50)",
 			"/resume <n>  reopen session by 1-based index from /sessions",
 			"/status  show session id, model, cwd",
 		].join("\n"),
@@ -125,24 +125,42 @@ bot.command("new", async ctx => {
 	await ctx.reply(`✨ fresh session in ${chat.cwd}\nid: ${chat.sessionId}`);
 });
 
+const SESSIONS_DEFAULT_LIMIT = 8;
+const SESSIONS_MAX_LIMIT = 50;
+
 bot.command("sessions", async ctx => {
 	const chat = registry.get(ctx.chat.id);
-	const sessions = await listStoredSessions(chat.cwd, 8);
+	const arg = ctx.match?.trim();
+	let limit = SESSIONS_DEFAULT_LIMIT;
+	if (arg) {
+		const n = Number.parseInt(arg, 10);
+		if (!Number.isFinite(n) || n < 1) {
+			await ctx.reply(
+				`usage: /sessions [n]   1..${SESSIONS_MAX_LIMIT}, default ${SESSIONS_DEFAULT_LIMIT}`,
+			);
+			return;
+		}
+		limit = Math.min(n, SESSIONS_MAX_LIMIT);
+	}
+	const sessions = await listStoredSessions(chat.cwd, limit);
 	if (sessions.length === 0) {
 		await ctx.reply(`no stored sessions in ${chat.cwd}`);
 		return;
 	}
-	// Cache the list on the chat so /resume <n> can index into it.
 	storedSessionsByChat.set(ctx.chat.id, sessions);
 	const lines = sessions.map((s, i) => {
 		const ts = s.modified.toISOString().slice(5, 16).replace("T", " ");
-		const preview = ((s.firstMessage || s.title || "(no message)")
-			.split("\n")[0] ?? "")
-			.slice(0, 70);
+		// Prefer the LLM-generated title; fall back to the first user message;
+		// last resort the placeholder.
+		const raw = s.title || s.firstMessage || "(no message)";
+		const preview = (raw.split("\n")[0] ?? "").slice(0, 70);
 		return `${i + 1}. [${ts}] ${preview}`;
 	});
+	const footer = sessions.length >= limit && limit < SESSIONS_MAX_LIMIT
+		? `…showing ${limit}; pass a larger number e.g. /sessions ${Math.min(limit * 2, SESSIONS_MAX_LIMIT)}`
+		: "use /resume <n> to reopen";
 	await ctx.reply(
-		[`recent sessions in ${chat.cwd}`, "", ...lines, "", "use /resume <n> to reopen"].join("\n"),
+		[`recent sessions in ${chat.cwd}`, "", ...lines, "", footer].join("\n"),
 	);
 });
 
