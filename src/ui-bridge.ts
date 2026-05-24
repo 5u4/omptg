@@ -20,6 +20,7 @@ import type {
 	Theme,
 } from "@oh-my-pi/pi-coding-agent";
 import { theme as defaultTheme } from "@oh-my-pi/pi-coding-agent";
+import { scoped } from "./logger.ts";
 
 const CALLBACK_PREFIX = "ompui:";
 const TEXT_REPLY_PREFIX = "(reply with text)";
@@ -58,39 +59,59 @@ export function parseCallback(
 
 export class TelegramUI implements ExtensionUIContext {
 	private current: PendingUiRequest | undefined;
+	private readonly log;
 
-	// Use OMP's real default theme so tools that read `theme.status`,
-	// `theme.symbol(...)`, etc. don't crash. `initTheme()` must have been
-	// called once during boot (see main.ts) for this instance to be backed.
 	readonly theme: Theme = defaultTheme;
 
 	constructor(
 		private readonly bot: Bot,
 		private readonly chatId: number,
-	) {}
+	) {
+		this.log = scoped(`ui:${chatId}`);
+	}
 
 	pending(): PendingUiRequest | undefined {
 		return this.current;
 	}
 
-	/** Resolve a pending UI request. Returns false if nothing was waiting. */
 	resolve(
 		payload:
 			| { kind: "callback"; requestId: string; value: unknown }
 			| { kind: "text"; text: string },
 	): boolean {
 		const pending = this.current;
-		if (!pending) return false;
+		this.log.info("resolve.attempt", {
+			payload_kind: payload.kind,
+			payload_req_id: payload.kind === "callback" ? payload.requestId : undefined,
+			payload_value: payload.kind === "callback" ? payload.value : payload.text.slice(0, 60),
+			pending_kind: pending?.kind,
+			pending_req_id: pending?.requestId,
+			pending_awaits_text: pending?.awaitsText,
+		});
+		if (!pending) {
+			this.log.warn("resolve.no_pending");
+			return false;
+		}
 		if (payload.kind === "callback") {
-			if (pending.requestId !== payload.requestId) return false;
+			if (pending.requestId !== payload.requestId) {
+				this.log.warn("resolve.req_id_mismatch", {
+					expected: pending.requestId,
+					got: payload.requestId,
+				});
+				return false;
+			}
 			this.current = undefined;
 			pending.resolve(payload.value);
+			this.log.info("resolve.ok", { req_id: pending.requestId });
 			return true;
 		}
-		// text reply
-		if (!pending.awaitsText) return false;
+		if (!pending.awaitsText) {
+			this.log.warn("resolve.text_into_non_text", { pending_kind: pending.kind });
+			return false;
+		}
 		this.current = undefined;
 		pending.resolve(payload.text);
+		this.log.info("resolve.ok_text", { req_id: pending.requestId });
 		return true;
 	}
 
@@ -103,7 +124,7 @@ export class TelegramUI implements ExtensionUIContext {
 	): Promise<string | undefined> {
 		this.rejectInFlight();
 		const requestId = freshId();
-		// Encode option by *index* to stay inside the 64-byte callback cap.
+		this.log.info("select.fire", { req_id: requestId, title, n_options: options.length });
 		const keyboard: InlineKeyboardButton[][] = options.map((opt, i) => [
 			{ text: opt, callback_data: encodeCallback(requestId, `i${i}`) },
 		]);
@@ -113,9 +134,17 @@ export class TelegramUI implements ExtensionUIContext {
 				callback_data: encodeCallback(requestId, "cancel"),
 			},
 		]);
+		const sample = keyboard[0]?.[0];
+		const sampleCb = sample && "callback_data" in sample ? sample.callback_data : undefined;
+		this.log.info("select.callback_sample", {
+			req_id: requestId,
+			cb: sampleCb,
+			cb_len: sampleCb?.length,
+		});
 		const msg = await this.bot.api.sendMessage(this.chatId, `❓ ${title}`, {
 			reply_markup: { inline_keyboard: keyboard },
 		});
+		this.log.info("select.posted", { req_id: requestId, message_id: msg.message_id });
 		return new Promise<string | undefined>(resolve => {
 			this.current = {
 				requestId,
@@ -124,6 +153,7 @@ export class TelegramUI implements ExtensionUIContext {
 				awaitsText: false,
 				resolve: raw => {
 					const v = String(raw);
+					this.log.info("select.resolving", { req_id: requestId, raw: v });
 					if (v === "cancel") return resolve(undefined);
 					if (v.startsWith("i")) {
 						const idx = Number.parseInt(v.slice(1), 10);
@@ -142,16 +172,11 @@ export class TelegramUI implements ExtensionUIContext {
 	): Promise<boolean> {
 		this.rejectInFlight();
 		const requestId = freshId();
+		this.log.info("confirm.fire", { req_id: requestId, title });
 		const keyboard: InlineKeyboardButton[][] = [
 			[
-				{
-					text: "✅ yes",
-					callback_data: encodeCallback(requestId, "y"),
-				},
-				{
-					text: "❌ no",
-					callback_data: encodeCallback(requestId, "n"),
-				},
+				{ text: "✅ yes", callback_data: encodeCallback(requestId, "y") },
+				{ text: "❌ no",  callback_data: encodeCallback(requestId, "n") },
 			],
 		];
 		const text = title === message || !title ? message : `${title}\n\n${message}`;
@@ -160,13 +185,17 @@ export class TelegramUI implements ExtensionUIContext {
 			`❓ ${text}`,
 			{ reply_markup: { inline_keyboard: keyboard } },
 		);
+		this.log.info("confirm.posted", { req_id: requestId, message_id: msg.message_id });
 		return new Promise<boolean>(resolve => {
 			this.current = {
 				requestId,
 				kind: "confirm",
 				messageId: msg.message_id,
 				awaitsText: false,
-				resolve: raw => resolve(String(raw) === "y"),
+				resolve: raw => {
+					this.log.info("confirm.resolving", { req_id: requestId, raw: String(raw) });
+					resolve(String(raw) === "y");
+				},
 			};
 		});
 	}

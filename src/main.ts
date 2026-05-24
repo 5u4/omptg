@@ -13,6 +13,9 @@ import { resolve as resolvePath } from "node:path";
 import { ChatRegistry, listStoredSessions } from "./chat.ts";
 import { parseCallback } from "./ui-bridge.ts";
 import { initTheme } from "@oh-my-pi/pi-coding-agent";
+import { scoped, logPath } from "./logger.ts";
+
+const log = scoped("main");
 
 const TOKEN = required("TELEGRAM_BOT_TOKEN");
 const DEFAULT_CWD = resolveDir(required("OMP_DEFAULT_CWD"));
@@ -44,11 +47,28 @@ function resolveDir(path: string): string {
 const bot = new Bot(TOKEN);
 const registry = new ChatRegistry(bot, DEFAULT_CWD);
 
+// Log every inbound update before any guards so we can see callback_query
+// updates even when the allow-list later drops them.
+bot.use(async (ctx, next) => {
+	const u = ctx.update;
+	log.info("update", {
+		update_id: u.update_id,
+		kind: u.callback_query ? "callback_query" : u.message ? "message" : "other",
+		chat_id: ctx.chat?.id,
+		chat_id_alias: ctx.chatId,
+		from: ctx.from?.id,
+		text: ctx.message?.text?.slice(0, 80),
+		cb_data: u.callback_query?.data,
+		cb_msg_chat_id: u.callback_query?.message?.chat?.id,
+	});
+	await next();
+});
+
 // Allow-list guard.
 bot.use(async (ctx, next) => {
-	const id = ctx.chat?.id?.toString();
+	const id = (ctx.chat?.id ?? ctx.chatId)?.toString();
 	if (!id || (ALLOWED.size && !ALLOWED.has(id))) {
-		console.warn(`[auth] rejecting chat_id=${id}`);
+		log.warn("auth.reject", { chat_id: id, allowed: [...ALLOWED] });
 		return;
 	}
 	await next();
@@ -172,26 +192,40 @@ bot.command("resume", async ctx => {
 bot.on("callback_query:data", async ctx => {
 	const data = ctx.callbackQuery.data;
 	const parsed = parseCallback(data);
+	log.info("callback.recv", {
+		raw: data,
+		parsed,
+		ctx_chat_id: ctx.chat?.id,
+		ctx_chat_id_alias: ctx.chatId,
+		msg_chat_id: ctx.callbackQuery.message?.chat.id,
+	});
 	if (!parsed) {
 		await ctx.answerCallbackQuery();
 		return;
 	}
-	// `ctx.chat` is undefined on callback_query; the chat lives on
-	// `callback_query.message.chat`. `ctx.chatId` covers both shapes.
 	const chatId = ctx.chatId ?? ctx.callbackQuery.message?.chat.id;
 	if (chatId === undefined) {
-		console.warn("[callback] no chat id on callback_query");
+		log.warn("callback.no_chat_id", { raw: data });
 		await ctx.answerCallbackQuery("no chat context");
 		return;
 	}
 	const chat = registry.get(chatId);
+	const pending = chat.pendingUi();
+	log.info("callback.resolve_attempt", {
+		chat_id: chatId,
+		req_id: parsed.requestId,
+		value: parsed.value,
+		pending_kind: pending?.kind,
+		pending_req_id: pending?.requestId,
+		pending_awaits_text: pending?.awaitsText,
+	});
 	const ok = chat.resolvePending({
 		kind: "callback",
 		requestId: parsed.requestId,
 		value: parsed.value,
 	});
+	log.info("callback.resolved", { ok, chat_id: chatId, req_id: parsed.requestId });
 	await ctx.answerCallbackQuery(ok ? undefined : "expired");
-	// Strip the keyboard so the buttons don't linger after a tap.
 	if (ok && ctx.callbackQuery.message) {
 		try {
 			await ctx.api.editMessageReplyMarkup(
@@ -199,8 +233,8 @@ bot.on("callback_query:data", async ctx => {
 				ctx.callbackQuery.message.message_id,
 				{ reply_markup: { inline_keyboard: [] } },
 			);
-		} catch {
-			/* ignore */
+		} catch (err) {
+			log.warn("callback.strip_keyboard_failed", { err: String(err) });
 		}
 	}
 });
@@ -256,11 +290,20 @@ async function shutdown(signal: string) {
 process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
-console.log(`[boot] default cwd: ${DEFAULT_CWD}`);
+log.info("boot.start", {
+	cwd: DEFAULT_CWD,
+	allowed_chats: [...ALLOWED],
+	log_file: logPath(),
+});
 // Initialize OMP's theme system so tools that read theme.status / theme.symbol
 // (e.g. the `ask` tool) have a backing instance instead of an empty stub.
 await initTheme();
-console.log("[boot] starting bot polling…");
-bot.start({
-	onStart: info => console.log(`[boot] @${info.username} ready`),
+log.info("boot.theme_ready");
+// IMPORTANT: telegram's getUpdates DEFAULT allowed_updates EXCLUDES
+// callback_query. Without listing it explicitly we never receive button
+// taps from inline keyboards — the bot looks alive but UI buttons silently
+// drop. List every update type we care about.
+await bot.start({
+	allowed_updates: ["message", "edited_message", "callback_query"],
+	onStart: info => log.info("boot.ready", { username: info.username }),
 });
