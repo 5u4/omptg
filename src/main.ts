@@ -91,9 +91,8 @@ bot.command("start", ctx =>
 			"send any text to chat with the agent",
 			"/cancel  abort current turn (keeps session)",
 			"/new     start a fresh session in the current cwd",
-			"/dir <path>  switch this chat to a different cwd",
-			"/dirs    list recent stored sessions for current cwd",
-			"/resume <n>  reopen session by 1-based index from /dirs",
+			"/sessions  list recent stored sessions for current cwd",
+			"/resume <n>  reopen session by 1-based index from /sessions",
 			"/status  show session id, model, cwd",
 		].join("\n"),
 	),
@@ -126,26 +125,7 @@ bot.command("new", async ctx => {
 	await ctx.reply(`✨ fresh session in ${chat.cwd}\nid: ${chat.sessionId}`);
 });
 
-bot.command("dir", async ctx => {
-	const raw = ctx.match?.trim();
-	if (!raw) {
-		await ctx.reply(
-			`current cwd: ${registry.get(ctx.chat.id).cwd}\nusage: /dir <absolute path>`,
-		);
-		return;
-	}
-	const abs = resolvePath(raw.replace(/^~(?=$|\/)/, Bun.env.HOME ?? ""));
-	if (!existsSync(abs)) {
-		await ctx.reply(`not found: ${abs}`);
-		return;
-	}
-	const chat = registry.get(ctx.chat.id);
-	if (chat.isStreaming) await chat.abort();
-	await chat.switchCwd(abs);
-	await ctx.reply(`📂 switched to ${abs}\nid: ${chat.sessionId}`);
-});
-
-bot.command("dirs", async ctx => {
+bot.command("sessions", async ctx => {
 	const chat = registry.get(ctx.chat.id);
 	const sessions = await listStoredSessions(chat.cwd, 8);
 	if (sessions.length === 0) {
@@ -174,13 +154,13 @@ const storedSessionsByChat = new Map<
 bot.command("resume", async ctx => {
 	const arg = ctx.match?.trim();
 	if (!arg) {
-		await ctx.reply("usage: /resume <n>   (run /dirs first to see the list)");
+		await ctx.reply("usage: /resume <n>   (run /sessions first to see the list)");
 		return;
 	}
 	const n = Number.parseInt(arg, 10);
 	const cached = storedSessionsByChat.get(ctx.chat.id);
 	if (!cached || !Number.isFinite(n) || n < 1 || n > cached.length) {
-		await ctx.reply("invalid index; run /dirs first");
+		await ctx.reply("invalid index; run /sessions first");
 		return;
 	}
 	const target = cached[n - 1]!;
