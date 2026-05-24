@@ -338,6 +338,23 @@ log.info("boot.start", {
 await initTheme();
 log.info("boot.theme_ready");
 
+// Register slash commands with Telegram so they show up in the chat
+// autocomplete and the menu button. Best-effort: a network blip here is
+// not fatal — the bot can still receive /commands without registration.
+try {
+	await bot.api.setMyCommands([
+		{ command: "new",      description: "Start a fresh session in the current cwd" },
+		{ command: "sessions", description: "List recent stored sessions (default 8)" },
+		{ command: "resume",   description: "Reopen session by index from /sessions" },
+		{ command: "cancel",   description: "Abort the current turn (keeps session)" },
+		{ command: "status",   description: "Show session id, model, cwd" },
+		{ command: "start",    description: "Show help" },
+	]);
+	log.info("boot.commands_registered");
+} catch (err) {
+	log.warn("boot.commands_register_failed", { err: String(err) });
+}
+
 // Telegram caches the LAST allowed_updates value per bot token. If a
 // previous run (or any other client using this token) called getUpdates
 // without callback_query, telegram will keep filtering them out until we
