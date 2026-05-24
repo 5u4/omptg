@@ -51,15 +51,23 @@ const registry = new ChatRegistry(bot, DEFAULT_CWD);
 // updates even when the allow-list later drops them.
 bot.use(async (ctx, next) => {
 	const u = ctx.update;
+	const kind = u.callback_query
+		? "callback_query"
+		: u.message
+			? "message"
+			: Object.keys(u).filter(k => k !== "update_id")[0] ?? "unknown";
 	log.info("update", {
 		update_id: u.update_id,
-		kind: u.callback_query ? "callback_query" : u.message ? "message" : "other",
+		kind,
 		chat_id: ctx.chat?.id,
 		chat_id_alias: ctx.chatId,
 		from: ctx.from?.id,
 		text: ctx.message?.text?.slice(0, 80),
 		cb_data: u.callback_query?.data,
 		cb_msg_chat_id: u.callback_query?.message?.chat?.id,
+		// Full raw on any non-message update so we don't lose data on
+		// surprises (channel_post, chat_member, inline_query, etc).
+		raw: kind === "message" ? undefined : u,
 	});
 	await next();
 });
@@ -287,6 +295,22 @@ async function shutdown(signal: string) {
 	await registry.disposeAll();
 	process.exit(0);
 }
+process.on("uncaughtException", err => {
+	log.error("uncaughtException", {
+		err: String(err),
+		stack: err instanceof Error ? err.stack : undefined,
+	});
+});
+process.on("unhandledRejection", reason => {
+	log.error("unhandledRejection", {
+		reason: String(reason),
+		stack: reason instanceof Error ? reason.stack : undefined,
+	});
+});
+process.on("exit", code => {
+	log.warn("process.exit", { code });
+});
+
 process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
