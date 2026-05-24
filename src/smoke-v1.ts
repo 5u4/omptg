@@ -12,6 +12,9 @@
  */
 import { ChatSession, listStoredSessions } from "./chat.ts";
 import type { Bot } from "grammy";
+import { initTheme } from "@oh-my-pi/pi-coding-agent";
+
+await initTheme();
 
 const CWD = Bun.argv[2] ?? "/tmp";
 

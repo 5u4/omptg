@@ -19,6 +19,7 @@ import type {
 	TerminalInputHandler,
 	Theme,
 } from "@oh-my-pi/pi-coding-agent";
+import { theme as defaultTheme } from "@oh-my-pi/pi-coding-agent";
 
 const CALLBACK_PREFIX = "ompui:";
 const TEXT_REPLY_PREFIX = "(reply with text)";
@@ -58,10 +59,10 @@ export function parseCallback(
 export class TelegramUI implements ExtensionUIContext {
 	private current: PendingUiRequest | undefined;
 
-	// Required by ExtensionUIContext but we never run a real Theme stack here.
-	// The SDK only touches `theme` when an extension explicitly uses it; the
-	// tools that ship in the box don't.
-	readonly theme = {} as Theme;
+	// Use OMP's real default theme so tools that read `theme.status`,
+	// `theme.symbol(...)`, etc. don't crash. `initTheme()` must have been
+	// called once during boot (see main.ts) for this instance to be backed.
+	readonly theme: Theme = defaultTheme;
 
 	constructor(
 		private readonly bot: Bot,

@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { ChatRegistry, listStoredSessions } from "./chat.ts";
 import { parseCallback } from "./ui-bridge.ts";
+import { initTheme } from "@oh-my-pi/pi-coding-agent";
 
 const TOKEN = required("TELEGRAM_BOT_TOKEN");
 const DEFAULT_CWD = resolveDir(required("OMP_DEFAULT_CWD"));
@@ -245,6 +246,9 @@ process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
 console.log(`[boot] default cwd: ${DEFAULT_CWD}`);
+// Initialize OMP's theme system so tools that read theme.status / theme.symbol
+// (e.g. the `ask` tool) have a backing instance instead of an empty stub.
+await initTheme();
 console.log("[boot] starting bot polling…");
 bot.start({
 	onStart: info => console.log(`[boot] @${info.username} ready`),
