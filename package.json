@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "start": "bun run src/main.ts",
+    "smoke": "bun run src/smoke.ts",
     "spike": "bun run src/spike.ts",
     "typecheck": "tsc --noEmit"
   },
