@@ -1,0 +1,17 @@
+{
+  "name": "omp-tg-sdk",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "spike": "bun run src/spike.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "^15.2.4",
+    "grammy": "^1.43.0"
+  }
+}
