@@ -263,15 +263,33 @@ bot.on("message:text", async ctx => {
 		}
 	}
 
-	try {
-		const streamer = await chat.prompt(text);
-		const s = await chat.ensure();
-		await s.waitForIdle();
-		await streamer.finalize();
-	} catch (err) {
-		console.error(`[chat ${ctx.chat.id}] turn failed:`, err);
-		await ctx.reply(`❌ ${err instanceof Error ? err.message : String(err)}`);
-	}
+	// CRITICAL: grammY processes updates SEQUENTIALLY by default, and only
+	// advances to the next update after this handler returns. The agent
+	// turn can call ui.select / ui.confirm and then block waiting for the
+	// user's button tap — but that tap is the very next telegram update,
+	// which grammY can't deliver until we return. So we'd deadlock.
+	//
+	// Fire-and-forget the turn. Errors are captured + reported back into
+	// the chat asynchronously so we don't lose them.
+	void (async () => {
+		try {
+			const streamer = await chat.prompt(text);
+			const s = await chat.ensure();
+			await s.waitForIdle();
+			await streamer.finalize();
+		} catch (err) {
+			log.error("turn.failed", {
+				chat_id: ctx.chat.id,
+				err: String(err),
+				stack: err instanceof Error ? err.stack : undefined,
+			});
+			try {
+				await ctx.reply(`❌ ${err instanceof Error ? err.message : String(err)}`);
+			} catch (replyErr) {
+				log.error("turn.error_reply_failed", { err: String(replyErr) });
+			}
+		}
+	})();
 });
 
 bot.catch(err => {
