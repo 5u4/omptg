@@ -336,7 +336,11 @@ try {
 		last_error_message: info.last_error_message,
 	});
 	if (info.url) {
-		await bot.api.deleteWebhook({ drop_pending_updates: true });
+		// We have a stale webhook stealing our updates. Delete it but
+		// PRESERVE pending updates — a callback_query the user tapped
+		// while the webhook was active should still be delivered to us
+		// via polling once it's gone.
+		await bot.api.deleteWebhook({ drop_pending_updates: false });
 		log.info("boot.webhook_deleted");
 	}
 } catch (err) {
@@ -344,10 +348,16 @@ try {
 }
 
 // IMPORTANT: telegram's getUpdates DEFAULT allowed_updates EXCLUDES
-// callback_query. Pass it explicitly + drop pending so the new list
-// takes effect on the very first poll, ignoring stale state.
+// callback_query. Pass it explicitly so the new list takes effect.
+//
+// DO NOT pass drop_pending_updates here — that would discard any
+// callback_query tapped while the bot was momentarily down (e.g.
+// between two `bun start` runs), which is exactly the window when
+// users are most likely to be clicking. Old taps in the queue still
+// matter; the in-memory pending UI request that was created in the
+// prior process is gone, so the resolve will just answer "expired"
+// — fine, much better than silently swallowing the click forever.
 await bot.start({
 	allowed_updates: ["message", "edited_message", "callback_query"],
-	drop_pending_updates: true,
 	onStart: info => log.info("boot.ready", { username: info.username }),
 });
