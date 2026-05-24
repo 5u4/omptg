@@ -172,15 +172,26 @@ bot.command("resume", async ctx => {
 bot.on("callback_query:data", async ctx => {
 	const data = ctx.callbackQuery.data;
 	const parsed = parseCallback(data);
-	if (!parsed) return ctx.answerCallbackQuery();
-	const chat = registry.get(ctx.chat?.id ?? 0);
+	if (!parsed) {
+		await ctx.answerCallbackQuery();
+		return;
+	}
+	// `ctx.chat` is undefined on callback_query; the chat lives on
+	// `callback_query.message.chat`. `ctx.chatId` covers both shapes.
+	const chatId = ctx.chatId ?? ctx.callbackQuery.message?.chat.id;
+	if (chatId === undefined) {
+		console.warn("[callback] no chat id on callback_query");
+		await ctx.answerCallbackQuery("no chat context");
+		return;
+	}
+	const chat = registry.get(chatId);
 	const ok = chat.resolvePending({
 		kind: "callback",
 		requestId: parsed.requestId,
 		value: parsed.value,
 	});
 	await ctx.answerCallbackQuery(ok ? undefined : "expired");
-	// Strip the keyboard on the original message so the buttons don't linger.
+	// Strip the keyboard so the buttons don't linger after a tap.
 	if (ok && ctx.callbackQuery.message) {
 		try {
 			await ctx.api.editMessageReplyMarkup(

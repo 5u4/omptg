@@ -188,8 +188,8 @@ export class ChatSession {
 				break;
 			}
 			case "tool_execution_start": {
-				const t = (event as { tool?: { name?: string } }).tool;
-				if (t?.name) s?.pushStatus(`🔧 ${t.name}`);
+				const ev = event as { toolName?: string };
+				if (ev.toolName) s?.pushStatus(`🔧 ${ev.toolName}`);
 				break;
 			}
 			case "tool_execution_end": {
