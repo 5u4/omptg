@@ -8,9 +8,11 @@ subprocess, no JSON-RPC marshalling.
 
 ## Status
 
-**Spike**: hard-coded single chat / single cwd. Validates the event loop
-end-to-end (telegram message → `session.prompt` → streamed deltas → telegram
-message edit). Next: multi-chat, UI bridge, `/dir`, `/new`, `/resume`.
+**v1**: per-chat AgentSession, fully streaming, UI bridge (confirm /
+select / input / editor) wired through inline keyboards, and the core
+session commands (`/new`, `/sessions`, `/resume`, `/cancel`, `/status`).
+Each chat is pinned to one cwd at session creation; multi-cwd per chat
+will land when we add forum-topic support.
 
 ## Layout
 
