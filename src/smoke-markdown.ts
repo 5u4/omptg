@@ -13,10 +13,10 @@ function assert(cond: unknown, msg: string): asserts cond {
 	const src = "Hello **world** with 1+1=2 and a `code` span.";
 	const out = splitMarkdownForTelegram(src);
 	assert(out.length === 1, `expected 1 chunk, got ${out.length}`);
-	assert(out[0]!.includes("*world*"), `bold not converted: ${out[0]}`);
-	assert(out[0]!.includes("\\+"), `'+' not escaped: ${out[0]}`);
-	assert(out[0]!.includes("\\="), `'=' not escaped: ${out[0]}`);
-	assert(out[0]!.includes("`code`"), `code span lost: ${out[0]}`);
+	assert(out[0]!.md.includes("*world*"), `bold not converted: ${out[0]}`);
+	assert(out[0]!.md.includes("\\+"), `'+' not escaped: ${out[0]}`);
+	assert(out[0]!.md.includes("\\="), `'=' not escaped: ${out[0]}`);
+	assert(out[0]!.md.includes("`code`"), `code span lost: ${out[0]}`);
 	console.log("✓ short markdown → escaped MarkdownV2");
 }
 
@@ -25,8 +25,8 @@ function assert(cond: unknown, msg: string): asserts cond {
 	const src = "Before\n```ts\nconst x = 1;\nconst y = 2;\n```\nAfter";
 	const out = splitMarkdownForTelegram(src);
 	assert(out.length === 1, `should fit in 1 chunk, got ${out.length}`);
-	assert(out[0]!.includes("```"), `fence opener missing: ${out[0]}`);
-	assert(out[0]!.includes("const x = 1;"), `code body lost`);
+	assert(out[0]!.md.includes("```"), `fence opener missing: ${out[0]}`);
+	assert(out[0]!.md.includes("const x = 1;"), `code body lost`);
 	console.log("✓ fenced code preserved when it fits");
 }
 
@@ -38,10 +38,10 @@ function assert(cond: unknown, msg: string): asserts cond {
 	const out = splitMarkdownForTelegram(src, 2000);
 	assert(out.length >= 2, `should split, got ${out.length}`);
 	for (const chunk of out) {
-		assert(chunk.length <= 2000, `chunk too big: ${chunk.length}`);
+		assert(chunk.md.length <= 2000, `chunk too big: ${chunk.md.length}`);
 		// Each chunk's fence count must be even (balanced) — telegram
 		// rejects unterminated entities.
-		const fences = (chunk.match(/```/g) ?? []).length;
+		const fences = (chunk.md.match(/```/g) ?? []).length;
 		assert(fences % 2 === 0, `unbalanced fences in chunk: ${fences}`);
 	}
 	console.log(`✓ long fenced code split into ${out.length} balanced chunks`);
@@ -52,9 +52,9 @@ function assert(cond: unknown, msg: string): asserts cond {
 	const src = "# Header\n\n* item one\n* item two\n\n[link](https://example.com)";
 	const out = splitMarkdownForTelegram(src);
 	assert(out.length === 1, "header+list+link should fit in one chunk");
-	assert(out[0]!.includes("*Header*"), `header missing: ${out[0]}`);
-	assert(out[0]!.includes("[link]("), `link missing: ${out[0]}`);
-	assert(out[0]!.includes("https://example\\.com") || out[0]!.includes("https://example.com"),
+	assert(out[0]!.md.includes("*Header*"), `header missing: ${out[0]}`);
+	assert(out[0]!.md.includes("[link]("), `link missing: ${out[0]}`);
+	assert(out[0]!.md.includes("https://example\\.com") || out[0]!.md.includes("https://example.com"),
 		`link target wrong: ${out[0]}`);
 	console.log("✓ headers + lists + links converted");
 }

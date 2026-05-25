@@ -160,17 +160,20 @@ export class TelegramStreamer {
 	/**
 	 * Send a pre-converted MarkdownV2 chunk. If telegram rejects the entity
 	 * parsing (any 400 BAD REQUEST or "can't parse entities"), we fall back
-	 * to the raw text via plain send() so the user still sees something.
+	 * to sending the ORIGINAL markdown source as plain text — that's much
+	 * more readable than the MarkdownV2-escaped form (no `\.` `\(` `\!`
+	 * noise) and tells the user we hit a converter edge case rather than
+	 * dropping the message.
 	 */
-	private async sendMarkdown(md: string): Promise<void> {
+	private async sendMarkdown(chunk: { src: string; md: string }): Promise<void> {
 		try {
-			await this.bot.api.sendMessage(this.chatId, md, {
+			await this.bot.api.sendMessage(this.chatId, chunk.md, {
 				parse_mode: "MarkdownV2",
 			});
 		} catch (err) {
 			const m = errMsg(err);
-			console.warn("[md-send] failed, falling back to plain:", m);
-			await this.send(md);
+			console.warn("[md-send] failed, falling back to source plain:", m);
+			await this.send(chunk.src);
 		}
 	}
 }

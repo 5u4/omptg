@@ -42,12 +42,19 @@ const FENCE_RE = /^ {0,3}```(.*)$/;
  *  4. When flushing inside an open fence, append a closing ``` to the
  *     flushed chunk and prepend ```<info> to the next chunk.
  */
+export interface MarkdownChunk {
+	/** Original markdown source for this chunk (fence-balanced). */
+	src: string;
+	/** Telegram MarkdownV2 conversion of `src`. */
+	md: string;
+}
+
 export function splitMarkdownForTelegram(
 	text: string,
 	budget = MAX_MESSAGE_LEN,
-): string[] {
+): MarkdownChunk[] {
 	const lines = text.split("\n");
-	const out: string[] = [];
+	const out: MarkdownChunk[] = [];
 	let buf: string[] = [];
 	let openInfo: string | null = null;
 
@@ -61,8 +68,8 @@ export function splitMarkdownForTelegram(
 			// on the next chunk's first line.
 			chunkSrc += "\n```";
 		}
-		const converted = tryConvert(chunkSrc);
-		if (converted) out.push(converted);
+		const md = tryConvert(chunkSrc);
+		if (md) out.push({ src: chunkSrc, md });
 		buf = [];
 	};
 
@@ -86,9 +93,10 @@ export function splitMarkdownForTelegram(
 		} else if (tentative.length > budget) {
 			// Single line already exceeds budget — fall back to hard split
 			// on the converted form. Rare for sane assistant text.
-			const hard = tryConvert(buf.join("\n"));
+			const srcOnly = buf.join("\n");
+			const hard = tryConvert(srcOnly);
 			for (let i = 0; i < hard.length; i += budget) {
-				out.push(hard.slice(i, i + budget));
+				out.push({ src: srcOnly, md: hard.slice(i, i + budget) });
 			}
 			buf = [];
 		}
