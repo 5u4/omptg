@@ -85,6 +85,44 @@ function neutralizeHorizontalRules(src: string): string {
 }
 
 /**
+ * Rewrite ATX headings (`#`, `##`, `###`, …) to plain bold/italic lines
+ * with visual prefixes, because Telegram MarkdownV2 has no heading syntax
+ * and telegramify-markdown flattens ALL heading levels to a single bold
+ * line — so `# Title`, `## Section`, and `### Subsection` all look
+ * identical in chat, destroying document hierarchy.
+ *
+ * Mapping (chosen so each level survives telegramify and stays distinct):
+ *   #     → `**━━━ X ━━━**`   bold + box-drawing rails (most prominent)
+ *   ##    → `**▸ X**`          bold + caret prefix
+ *   ###   → `*X*`              italic only
+ *   ####+ → `*X*`              same as ### (Telegram only has 2 emphasis
+ *                              styles, no point inventing more)
+ *
+ * Skipped inside fenced code blocks so a `#` comment in a shell snippet
+ * isn't mangled. The fence tracker matches `splitMarkdownForTelegram`'s.
+ */
+function normalizeHeadings(src: string): string {
+	const lines = src.split("\n");
+	let inFence = false;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (FENCE_RE.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) continue;
+		const m = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+		if (!m) continue;
+		const level = m[1]!.length;
+		const text = m[2]!;
+		if (level === 1) lines[i] = `**━━━ ${text} ━━━**`;
+		else if (level === 2) lines[i] = `**▸ ${text}**`;
+		else lines[i] = `*${text}*`;
+	}
+	return lines.join("\n");
+}
+
+/**
  * Split `text` into chunks of at most `budget` characters (after telegramify
  * conversion) such that fenced code blocks never span a chunk boundary.
  * Returns the MarkdownV2 strings ready to send.
@@ -114,7 +152,7 @@ export function splitMarkdownForTelegram(
 	// Wrap GFM tables in code fences BEFORE line-walking so the fence-balance
 	// logic below treats them as ordinary fenced blocks. Strip markdown HR
 	// lines first so telegramify can't emit a raw `---` that Telegram rejects.
-	const lines = fenceTables(neutralizeHorizontalRules(text)).split("\n");
+	const lines = fenceTables(neutralizeHorizontalRules(normalizeHeadings(text))).split("\n");
 	const out: MarkdownChunk[] = [];
 	let buf: string[] = [];
 	let openInfo: string | null = null;

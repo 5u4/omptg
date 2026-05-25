@@ -68,9 +68,10 @@ const TELEGRAM_SYSTEM_BLOCK = [
 	"# Telegram output guidance",
 	"",
 	"You are talking to the user through a Telegram bot, not a terminal or IDE.",
-	"Telegram MarkdownV2 supports headings, bold/italic, inline code, fenced",
-	"code blocks, links, and lists — but NOT tables, and NOT wide ASCII",
-	"diagrams. Both wrap poorly on phone screens.",
+	"Telegram MarkdownV2 supports bold/italic, inline code, fenced code",
+	"blocks, links, and lists — but NOT real headings, NOT tables, and NOT",
+	"wide ASCII diagrams. All of these wrap poorly or render flat on phone",
+	"screens.",
 	"",
 	"For comparisons / option matrices / small data sets, prefer:",
 	"  - a markdown list with a one-line summary per item, OR",
@@ -80,6 +81,14 @@ const TELEGRAM_SYSTEM_BLOCK = [
 	"Only use a GFM table when the data genuinely has 3+ columns AND",
 	"the user explicitly asked for a table. Otherwise the bot wraps the",
 	"table in a code fence as a fallback, which is ugly on mobile.",
+
+	"AVOID markdown headings (`#`, `##`, `###`). Telegram has no heading",
+	"syntax — every level collapses to a single bold line, so a `#` title",
+	"and a `###` subsection look identical and the document hierarchy is",
+	"lost. The bridge rewrites headings to distinct visual markers as a",
+	"fallback, but the result is still less readable than prose. Prefer:",
+	"  - a short bold lead-in line (`**Topic.**`) followed by content, OR",
+	"  - a numbered/bulleted list when you'd reach for `###` per item.",
 ].join("\n");
 
 function withTelegramPrompt(defaults: string[]): string[] {

@@ -51,4 +51,28 @@ describe("splitMarkdownForTelegram", () => {
 		expect(chunks.length).toBeGreaterThan(1);
 		for (const c of chunks) expect(c.md.length).toBeLessThanOrEqual(4096);
 	});
+
+	test("rewrites # / ## / ### to visually-distinct bold/italic markers", () => {
+		const src = "# Big\n\n## Section\n\n### Subsection\n\n#### Deeper";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		expect(md).toContain("*━━━ Big ━━━*");
+		expect(md).toContain("*▸ Section*");
+		expect(md).toContain("_Subsection_");
+		expect(md).toContain("_Deeper_");
+		expect(md.split("\n").every(l => !/^#{1,6}\s/.test(l))).toBe(true);
+	});
+
+	test("leaves `#` lines inside fenced code blocks alone", () => {
+		const src = "```sh\n# shell comment\necho hi\n```";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		expect(md).toContain("# shell comment");
+		expect(md).not.toContain("━━━");
+		expect(md).not.toContain("▸");
+	});
+
+	test("heading rewrite ignores `#` mid-line (not a heading)", () => {
+		const md = splitMarkdownForTelegram("see issue #42 for context")[0]!.md;
+		expect(md).toContain("#42");
+		expect(md).not.toContain("━━━");
+	});
 });
