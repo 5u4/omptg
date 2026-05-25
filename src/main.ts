@@ -532,6 +532,30 @@ for (const scope of COMMAND_SCOPES) {
 }
 log.info("boot.commands_registered", { results: registered });
 
+// `chat` scope overrides all the broader scopes. If the bot was ever used
+// by a different codebase (or earlier version) that pushed a chat-specific
+// command list to a chat we now control, telegram clients in that chat will
+// keep showing the stale list. Wipe overrides for every chat we know
+// about so they fall through to our all_group_chats / all_private_chats
+// registration.
+const overrideChats = new Set<string>();
+for (const id of ALLOWED) overrideChats.add(id);
+for (const id of chatStore.chatIds()) overrideChats.add(id);
+const wiped: Array<{ chat_id: string; ok: boolean; err?: string }> = [];
+for (const id of overrideChats) {
+	try {
+		await bot.api.deleteMyCommands({
+			scope: { type: "chat", chat_id: Number(id) },
+		});
+		wiped.push({ chat_id: id, ok: true });
+	} catch (err) {
+		// Most likely error: bot is not a member of that chat (private chat
+		// the bot was never in, or a group we left). Not fatal.
+		wiped.push({ chat_id: id, ok: false, err: String(err) });
+	}
+}
+if (wiped.length > 0) log.info("boot.chat_overrides_wiped", { results: wiped });
+
 // Telegram caches the LAST allowed_updates value per bot token. If a
 // previous run (or any other client using this token) called getUpdates
 // without callback_query, telegram will keep filtering them out until we

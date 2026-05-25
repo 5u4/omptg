@@ -91,6 +91,10 @@ export class ChatStore {
 		return true;
 	}
 
+	chatIds(): string[] {
+		return Object.keys(this.data.chats);
+	}
+
 	get filePath(): string {
 		return this.path;
 	}
