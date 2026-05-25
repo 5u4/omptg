@@ -15,7 +15,7 @@ import { ChatRegistry, listStoredSessions } from "./chat.ts";
 import { ChatStore, expandHome } from "./chat-store.ts";
 import { parseCallback } from "./ui-bridge.ts";
 import { formatReplyPrompt, formatForwardPrompt, type ReplyContext, type ForwardContext } from "./quote.ts";
-import { downloadAsImageContent } from "./media.ts";
+import { downloadPhotoToCache } from "./media.ts";
 import { initTheme } from "@oh-my-pi/pi-coding-agent";
 import { scoped, logPath } from "./logger.ts";
 
@@ -443,37 +443,52 @@ function knownCommands(): Set<string> {
 	}
 	return _knownCommands;
 }
-// Image input. Telegram sends an array of PhotoSize entries (thumbnail …
-// original); the last one is the largest. Download via getFile + the
-// public file CDN, base64-encode, and ship as a single ImageContent
-// alongside the caption (or a default prompt if no caption was supplied).
+// Image input — Hermes-style indirect vision.
 //
-// Note: we DON'T forward the image as a fire-and-forget background turn
-// the way we do for text — image downloads are I/O-bound and we want the
-// "↪ steered" / typing feedback path to kick in only after we have a
-// payload to actually send. Errors surface as a reply to the user.
+// We DO NOT pass the image bytes directly to session.prompt({ images }).
+// That route gets stripped by SDK's vision-guard whenever the active
+// model's catalog entry lacks "image" input — and the user's preferred
+// long-context default (e.g. claude-opus-4.7-1m-internal) is text-only
+// even when claude-opus-4.7 base is multimodal.
+//
+// Instead: download the photo to ~/.omp-tg/image-cache/<uuid>.<ext> and
+// hand the main agent a *text* prompt referencing the local path. The
+// main agent already has the `inspect_image` tool (OMP built-in), which
+// resolves modelRoles.vision and runs an out-of-band vision call with a
+// focused question. The default model stays in charge of context
+// (history + caption + when to look), the vision model only sees one
+// image at a time, and history stays text-only so subsequent turns
+// don't need vision-capable models.
 bot.on("message:photo", async ctx => {
 	const photos = ctx.message.photo;
 	const largest = photos[photos.length - 1];
-	if (!largest) return; // shouldn't happen — telegram always sends ≥1
-	const caption = ctx.message.caption?.trim();
-	const text = caption || "What do you see?";
-
+	if (!largest) return; // telegram always sends ≥1, defensive
+	const caption = ctx.message.caption?.trim() ?? "";
 	const chat = registry.get(ctx.chat.id);
 	const replyTo = ctx.message.message_id;
 
-	// Fire-and-forget like the text path — see comment in message:text for
-	// the deadlock rationale.
 	void (async () => {
 		try {
-			const image = await downloadAsImageContent(bot, largest.file_id);
+			const { path, bytes } = await downloadPhotoToCache(bot, largest.file_id);
+			log.info("photo.cached", { chat_id: ctx.chat.id, path, bytes });
+
+			// Prompt format: the local path on its own line so the agent
+			// can lift it verbatim into inspect_image(path=...), followed
+			// by the user's caption (or an explicit "no caption" sentinel
+			// so the agent doesn't think we forgot to forward it).
+			const promptText = [
+				`[user attached image: ${path}]`,
+				"",
+				caption || "(no caption — describe or ask what they want)",
+			].join("\n");
+
 			if (chat.isStreaming) {
 				await ctx.reply("↪ steered (/cancel to abort)", {
 					disable_notification: true,
 					reply_parameters: { message_id: replyTo },
 				});
 			}
-			await chat.prompt(text, { replyTo, images: [image] });
+			await chat.prompt(promptText, { replyTo });
 			const s = await chat.ensure();
 			await s.waitForIdle();
 		} catch (err) {
