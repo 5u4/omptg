@@ -47,9 +47,38 @@ export function encodeCallback(requestId: string, value: string): string {
 	return `${CALLBACK_PREFIX}${requestId}:${value}`;
 }
 
-/** Trim button text to budget, preserving leading whitespace, suffixing …. */
-function truncateButton(s: string, budget: number): string {
-	return s.length <= budget ? s : `${s.slice(0, budget - 1).trimEnd()}…`;
+/**
+ * Approximate Telegram's visual button width. CJK ideographs, full-width
+ * punctuation, hiragana/katakana, hangul, and most emoji render at roughly
+ * 2× the width of an ASCII glyph; the inline-button label gets ellipsised
+ * on phones well before 60 ASCII chars when the text is CJK-heavy. Count
+ * wide code points as 2 so the long-option threshold and the truncation
+ * budget both reflect what the user actually sees.
+ */
+function codePointWidth(cp: number): 1 | 2 {
+	return (cp >= 0x1100 && cp <= 0x11ff) || // Hangul Jamo
+		(cp >= 0x2e80 && cp <= 0x2eff) || // CJK Radicals Supplement
+		(cp >= 0x2f00 && cp <= 0x2fdf) || // Kangxi Radicals
+		(cp >= 0x3000 && cp <= 0x303f) || // CJK symbols & punctuation
+		(cp >= 0x3040 && cp <= 0x30ff) || // Hiragana, Katakana
+		(cp >= 0x3400 && cp <= 0x9fff) || // CJK Unified Ideographs + Ext A
+		(cp >= 0xa000 && cp <= 0xa4cf) || // Yi
+		(cp >= 0xac00 && cp <= 0xd7a3) || // Hangul syllables
+		(cp >= 0xf900 && cp <= 0xfaff) || // CJK Compatibility Ideographs
+		(cp >= 0xff00 && cp <= 0xff60) || // Fullwidth forms
+		(cp >= 0xffe0 && cp <= 0xffe6) ||
+		(cp >= 0x20000 && cp <= 0x2fffd) || // CJK Ext B–F
+		(cp >= 0x30000 && cp <= 0x3fffd) ||
+		(cp >= 0x1f300 && cp <= 0x1faff) || // Emoji & pictographs
+		(cp >= 0x2600 && cp <= 0x27bf)
+		? 2
+		: 1;
+}
+
+function visualWidth(s: string): number {
+	let w = 0;
+	for (const ch of s) w += codePointWidth(ch.codePointAt(0)!);
+	return w;
 }
 
 export function parseCallback(
@@ -146,7 +175,7 @@ export class TelegramUI implements ExtensionUIContext {
 		// the full option text, and switch buttons to short "1)" / "2)" /…
 		// labels. Short options keep the original verbatim-button UX.
 		const BUTTON_BUDGET = 60;
-		const longOptions = options.some(o => o.length > BUTTON_BUDGET);
+		const longOptions = options.some(o => visualWidth(o) > BUTTON_BUDGET);
 		if (longOptions) {
 			const preview = [
 				`❓ ${title}`,
@@ -158,7 +187,10 @@ export class TelegramUI implements ExtensionUIContext {
 
 		const keyboard: InlineKeyboardButton[][] = options.map((opt, i) => [
 			{
-				text: longOptions ? `${i + 1}) ${truncateButton(opt, BUTTON_BUDGET)}` : opt,
+				// In longOptions mode the full text is in the preview message above;
+				// the keyboard just needs an unambiguous tap target. A numeric-only
+				// label sidesteps "prefix + ellipsis pushes past the budget" entirely.
+				text: longOptions ? `${i + 1})` : opt,
 				callback_data: encodeCallback(requestId, `i${i}`),
 			},
 		]);
