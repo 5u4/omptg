@@ -5,8 +5,12 @@
   "scripts": {
     "start": "bun run src/main.ts",
     "smoke": "bun run src/smoke.ts",
-    "spike": "bun run src/spike.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:restart": "pm2 restart omp-tg",
+    "pm2:stop": "pm2 stop omp-tg",
+    "pm2:logs": "pm2 logs omp-tg",
+    "pm2:status": "pm2 status omp-tg"
   },
   "devDependencies": {
     "@types/bun": "latest",
