@@ -148,7 +148,7 @@ bot.command("start", ctx =>
 			"/cancel  abort current turn (keeps session)",
 			"/new     start a fresh session in the current cwd",
 			"/sessions [n]  list recent stored sessions (default 8, max 50)",
-			"/resume <n>  reopen session by 1-based index from /sessions",
+			"/resume [n]  reopen session by 1-based index (default: most recent)",
 			"/status  show session id, model, cwd",
 			"",
 			"chat → cwd binding",
@@ -349,23 +349,34 @@ const storedSessionsByChat = new Map<
 
 bot.command("resume", async ctx => {
 	const arg = ctx.match?.trim();
-	if (!arg) {
-		await ctx.reply("usage: /resume <n>   (run /sessions first to see the list)");
-		return;
-	}
-	const n = Number.parseInt(arg, 10);
-	const cached = storedSessionsByChat.get(ctx.chat.id);
-	if (!cached || !Number.isFinite(n) || n < 1 || n > cached.length) {
-		await ctx.reply("invalid index; run /sessions first");
-		return;
-	}
-	const target = cached[n - 1]!;
 	const chat = registry.get(ctx.chat.id);
+	let targetPath: string;
+	let targetIndex: number;
+	if (!arg) {
+		// No index: resume the most recent stored session in this cwd.
+		// Independent of /sessions cache so it works on a cold chat.
+		const latest = await listStoredSessions(chat.cwd, 1);
+		if (latest.length === 0) {
+			await ctx.reply(`no stored sessions in ${chat.cwd}`);
+			return;
+		}
+		targetPath = latest[0]!.path;
+		targetIndex = 1;
+	} else {
+		const n = Number.parseInt(arg, 10);
+		const cached = storedSessionsByChat.get(ctx.chat.id);
+		if (!cached || !Number.isFinite(n) || n < 1 || n > cached.length) {
+			await ctx.reply("invalid index; run /sessions first");
+			return;
+		}
+		targetPath = cached[n - 1]!.path;
+		targetIndex = n;
+	}
 	if (chat.isStreaming) await chat.abort();
 	try {
-		await chat.resume(target.path);
+		await chat.resume(targetPath);
 		await ctx.reply(
-			`📜 resumed session ${chat.sessionId}\ncwd: ${chat.cwd}`,
+			`📜 resumed #${targetIndex} ${chat.sessionId}\ncwd: ${chat.cwd}`,
 		);
 	} catch (err) {
 		await ctx.reply(`failed to resume: ${err instanceof Error ? err.message : err}`);
@@ -718,7 +729,7 @@ log.info("boot.theme_ready");
 const SLASH_COMMANDS = [
 	{ command: "new",      description: "Start a fresh session in the current cwd" },
 	{ command: "sessions", description: "List recent stored sessions (default 8)" },
-	{ command: "resume",   description: "Reopen session by index from /sessions" },
+	{ command: "resume",   description: "Reopen session — no arg = most recent" },
 	{ command: "cancel",   description: "Abort the current turn (keeps session)" },
 	{ command: "status",   description: "Show session id, model, cwd" },
 	{ command: "whoami",   description: "Show this chat's id + binding" },
