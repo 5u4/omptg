@@ -22,6 +22,7 @@ import { TelegramStreamer } from "./streamer.ts";
 import { TelegramUI, type PendingUiRequest } from "./ui-bridge.ts";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { scoped } from "./logger.ts";
+import { ChatStore } from "./chat-store.ts";
 
 export interface ChatSessionOptions {
 	chatId: number;
@@ -276,14 +277,25 @@ export class ChatRegistry {
 	constructor(
 		private readonly bot: Bot,
 		private readonly defaultCwd: string,
+		private readonly store: ChatStore,
 	) {}
+
+	/** Persistent binding store, exposed for command handlers. */
+	get bindings(): ChatStore {
+		return this.store;
+	}
+
+	/** Resolve cwd for a chat: stored binding if present, else default. */
+	cwdFor(chatId: number): string {
+		return this.store.get(chatId)?.cwd ?? this.defaultCwd;
+	}
 
 	get(chatId: number): ChatSession {
 		let chat = this.chats.get(chatId);
 		if (!chat) {
 			chat = new ChatSession({
 				chatId,
-				cwd: this.defaultCwd,
+				cwd: this.cwdFor(chatId),
 				bot: this.bot,
 			});
 			this.chats.set(chatId, chat);

@@ -11,6 +11,7 @@ import { Bot, GrammyError, HttpError } from "grammy";
 import { existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { ChatRegistry, listStoredSessions } from "./chat.ts";
+import { ChatStore, expandHome } from "./chat-store.ts";
 import { parseCallback } from "./ui-bridge.ts";
 import { initTheme } from "@oh-my-pi/pi-coding-agent";
 import { scoped, logPath } from "./logger.ts";
@@ -45,7 +46,8 @@ function resolveDir(path: string): string {
 }
 
 const bot = new Bot(TOKEN);
-const registry = new ChatRegistry(bot, DEFAULT_CWD);
+const chatStore = new ChatStore();
+const registry = new ChatRegistry(bot, DEFAULT_CWD, chatStore);
 
 // Log every inbound update before any guards so we can see callback_query
 // updates even when the allow-list later drops them.
@@ -91,9 +93,15 @@ bot.command("start", ctx =>
 			"send any text to chat with the agent",
 			"/cancel  abort current turn (keeps session)",
 			"/new     start a fresh session in the current cwd",
-			"/sessions [n]  list recent stored sessions for current cwd (default 8, max 50)",
+			"/sessions [n]  list recent stored sessions (default 8, max 50)",
 			"/resume <n>  reopen session by 1-based index from /sessions",
 			"/status  show session id, model, cwd",
+			"",
+			"chat → cwd binding",
+			"/whoami   show this chat's id, type, and binding",
+			"/bind <path> [|label]   bind this chat to a cwd (effect: next /new)",
+			"/unbind   remove this chat's binding",
+			"/binding  show the active binding",
 		].join("\n"),
 	),
 );
@@ -116,12 +124,117 @@ bot.command("cancel", async ctx => {
 	await ctx.reply(cancelled ? "aborted" : "nothing to cancel");
 });
 
+bot.command("whoami", async ctx => {
+	const chatId = ctx.chat.id;
+	const binding = registry.bindings.get(chatId);
+	const lines = [
+		`chat_id: ${chatId}`,
+		`chat_type: ${ctx.chat.type}`,
+	];
+	const title = "title" in ctx.chat ? ctx.chat.title : undefined;
+	if (title) lines.push(`chat_title: ${title}`);
+	lines.push("");
+	if (binding) {
+		lines.push(`bound to: ${binding.cwd}`);
+		if (binding.label) lines.push(`label: ${binding.label}`);
+		lines.push(`since: ${binding.added_at}`);
+	} else {
+		lines.push(`no binding — uses default cwd: ${DEFAULT_CWD}`);
+		lines.push(`bind with: /bind <path>`);
+	}
+	await ctx.reply(lines.join("\n"));
+});
+
+bot.command("binding", async ctx => {
+	const chatId = ctx.chat.id;
+	const binding = registry.bindings.get(chatId);
+	if (!binding) {
+		await ctx.reply(
+			`no binding for chat ${chatId}\nfalls back to default: ${DEFAULT_CWD}`,
+		);
+		return;
+	}
+	const lines = [
+		`chat_id: ${chatId}`,
+		`cwd: ${binding.cwd}`,
+	];
+	if (binding.label) lines.push(`label: ${binding.label}`);
+	lines.push(`added: ${binding.added_at}`);
+	await ctx.reply(lines.join("\n"));
+});
+
+bot.command("bind", async ctx => {
+	const raw = ctx.match?.trim();
+	if (!raw) {
+		await ctx.reply(
+			[
+				"usage: /bind <path> [|label]",
+				"  e.g. /bind ~/Workspaces/omp-tg",
+				"  e.g. /bind ~/Workspaces/foo|foo dev",
+				"",
+				"the new cwd takes effect on the next /new — the current session keeps its cwd",
+			].join("\n"),
+		);
+		return;
+	}
+	// Optional `|label` suffix, split on first `|` only.
+	const sep = raw.indexOf("|");
+	const pathPart = (sep >= 0 ? raw.slice(0, sep) : raw).trim();
+	const label = sep >= 0 ? raw.slice(sep + 1).trim() : undefined;
+	const expanded = expandHome(pathPart);
+	const abs = resolvePath(expanded);
+	if (!existsSync(abs)) {
+		await ctx.reply(`❌ not found: ${abs}`);
+		return;
+	}
+	const fs = await import("node:fs");
+	if (!fs.statSync(abs).isDirectory()) {
+		await ctx.reply(`❌ not a directory: ${abs}`);
+		return;
+	}
+	registry.bindings.set(ctx.chat.id, { cwd: abs, label });
+	const chat = registry.get(ctx.chat.id);
+	const lines = [
+		`✓ bound to ${abs}`,
+		label ? `label: ${label}` : undefined,
+		"",
+		chat.cwd === abs
+			? "(already current cwd — nothing to switch)"
+			: "/new to apply (current session keeps cwd: " + chat.cwd + ")",
+	].filter(Boolean) as string[];
+	await ctx.reply(lines.join("\n"));
+	log.info("bind.set", { chat_id: ctx.chat.id, cwd: abs, label });
+});
+
+bot.command("unbind", async ctx => {
+	const removed = registry.bindings.delete(ctx.chat.id);
+	if (!removed) {
+		await ctx.reply(`no binding to remove (already using default: ${DEFAULT_CWD})`);
+		return;
+	}
+	await ctx.reply(
+		[
+			`✓ unbound — default cwd will be used on next /new: ${DEFAULT_CWD}`,
+			`(current session keeps its cwd)`,
+		].join("\n"),
+	);
+	log.info("bind.removed", { chat_id: ctx.chat.id });
+});
+
 bot.command("new", async ctx => {
 	const chat = registry.get(ctx.chat.id);
+	const desiredCwd = registry.cwdFor(ctx.chat.id);
 	if (chat.isStreaming) {
 		await chat.abort();
 	}
-	await chat.newSession();
+	// If the binding changed since this chat's session was created, the
+	// fresh session should land in the new cwd. switchCwd disposes the
+	// old session and creates a new one in the target cwd.
+	if (chat.cwd !== desiredCwd) {
+		await chat.switchCwd(desiredCwd);
+	} else {
+		await chat.newSession();
+	}
 	await ctx.reply(`✨ fresh session in ${chat.cwd}\nid: ${chat.sessionId}`);
 });
 
@@ -348,6 +461,10 @@ try {
 		{ command: "resume",   description: "Reopen session by index from /sessions" },
 		{ command: "cancel",   description: "Abort the current turn (keeps session)" },
 		{ command: "status",   description: "Show session id, model, cwd" },
+		{ command: "whoami",   description: "Show this chat's id + binding" },
+		{ command: "bind",     description: "/bind <path> — pin this chat to a cwd" },
+		{ command: "unbind",   description: "Remove this chat's binding" },
+		{ command: "binding",  description: "Show the active binding" },
 		{ command: "start",    description: "Show help" },
 	]);
 	log.info("boot.commands_registered");
