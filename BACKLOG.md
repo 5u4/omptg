@@ -39,6 +39,8 @@ to land in one session. Phases are loose — grab whatever feels useful.
 - bun:test coverage for `tool-render`, `chat-store`, `ui-bridge` (parseCallback + resolve matrix) — run with `bun test test/`
 - forum topics: ChatRegistry keyed by `(chatId, threadId)`; per-topic cwd bindings (topic → group → default); `message_thread_id` routed on every send / edit / typing / UI prompt; General topic shares the group key for zero-migration
 - voice input via `message:voice` / `message:audio` → ffmpeg → openai-whisper (local, via `@oh-my-pi/pi-coding-agent/stt`) → `[✅ send] [❌ cancel]` keyboard, with reply-to-transcription as the edit channel. `OMP_TG_STT_MODEL` (default `base`) and `OMP_TG_STT_LANG` (default `en`) tune the engine.
+- log rotation: on boot, gzip `logs/<date>.log` older than `OMP_TG_LOG_COMPRESS_AFTER_DAYS` (default 7) and delete past `OMP_TG_LOG_RETAIN_DAYS` (default 30). Active file is always skipped. PM2's own `logs/pm2-out.log` / `pm2-err.log` are managed separately via `pm2-logrotate` — see README.
+
 
 
 ---
@@ -70,19 +72,7 @@ pointing at a yaml/json list. Each one polls independently.
 
 ## Priority 4 — hygiene
 
-### P4.1 — log rotation
-
-`logs/<date>.log` rotates daily by filename but never deletes old days.
-`logs/pm2-out.log` and `logs/pm2-err.log` grow unbounded.
-
-PM2 ships `pm2-logrotate`:
-```sh
-pm2 install pm2-logrotate
-pm2 set pm2-logrotate:max_size 10M
-pm2 set pm2-logrotate:retain 14
-```
-Document in README. Our own structured log: add a `compress + delete files
-older than N days` pass on boot, or run via cron.
+### ~~P4.1 — log rotation~~  ✓ done (structured logs); pm2 logs via `pm2-logrotate` (see README)
 
 
 ### P4.3 — README quickstart polish

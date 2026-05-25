@@ -26,7 +26,8 @@ import {
 } from "./pending-voice.ts";
 
 import { initTheme } from "@oh-my-pi/pi-coding-agent";
-import { scoped, logPath } from "./logger.ts";
+import { scoped, logPath, logDir } from "./logger.ts";
+import { rotateLogs } from "./log-rotate.ts";
 
 const log = scoped("main");
 
@@ -1010,6 +1011,30 @@ log.info("boot.start", {
 	allowed_chats: [...ALLOWED],
 	log_file: logPath(),
 });
+
+// Prune old structured logs. Cheap; runs once per boot. The active
+// file (today's) is always skipped — see log-rotate.ts.
+const LOG_RETAIN_DAYS = Number(Bun.env.OMP_TG_LOG_RETAIN_DAYS ?? 30);
+const LOG_COMPRESS_AFTER_DAYS = Number(Bun.env.OMP_TG_LOG_COMPRESS_AFTER_DAYS ?? 7);
+try {
+	const result = await rotateLogs(logDir(), logPath(), {
+		retainDays: LOG_RETAIN_DAYS,
+		compressAfterDays: LOG_COMPRESS_AFTER_DAYS,
+	});
+	if (result.planned.length > 0) {
+		log.info("boot.log_rotated", {
+			planned: result.planned.length,
+			done: result.done.length,
+			failed: result.failed.length,
+			retain_days: LOG_RETAIN_DAYS,
+			compress_after_days: LOG_COMPRESS_AFTER_DAYS,
+			details: result.done,
+			errors: result.failed,
+		});
+	}
+} catch (err) {
+	log.warn("boot.log_rotate_failed", { err: String(err) });
+}
 await initTheme();
 log.info("boot.theme_ready");
 

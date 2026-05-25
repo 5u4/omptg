@@ -66,3 +66,4 @@ export function scoped(scope: string) {
 export type Logger = ReturnType<typeof scoped>;
 
 export const logPath = todayPath;
+export const logDir = (): string => LOG_DIR;

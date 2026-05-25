@@ -91,6 +91,21 @@ ecosystem.config.cjs ← PM2 process config
 - `logs/pm2-out.log`, `logs/pm2-err.log` — raw stdout/stderr captured by
   PM2 (`pm2 logs omp-tg` reads these).
 
+### Rotation
+
+- **Structured JSONL** (`logs/<date>.log`): rotated automatically on each
+  boot. Files older than `OMP_TG_LOG_COMPRESS_AFTER_DAYS` (default 7)
+  are gzipped in place; files older than `OMP_TG_LOG_RETAIN_DAYS`
+  (default 30) are deleted. The active day's file is never touched.
+- **PM2 stdout/stderr** (`logs/pm2-out.log` / `pm2-err.log`): not managed
+  by us — install [`pm2-logrotate`](https://github.com/keymetrics/pm2-logrotate):
+  ```sh
+  pm2 install pm2-logrotate
+  pm2 set pm2-logrotate:max_size 10M
+  pm2 set pm2-logrotate:retain 14
+  pm2 set pm2-logrotate:compress true
+  ```
+
 ## Why this and not the python fork
 
 `../omp-tg-bridge` was a fork of FreakySurgeon/claude-telegram-bridge with
