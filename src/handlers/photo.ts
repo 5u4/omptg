@@ -30,7 +30,6 @@ export function installPhotoHandler(deps: Deps): void {
 		const largest = photos[photos.length - 1];
 		if (!largest) return; // telegram always sends ≥1, defensive
 		const caption = ctx.message.caption?.trim() ?? "";
-		const chat = deps.registry.get(ctx.chat.id, extractThreadId(ctx.message));
 		const chatId = ctx.chat.id;
 		const threadId = extractThreadId(ctx.message);
 		const replyTo = ctx.message.message_id;
@@ -54,6 +53,11 @@ export function installPhotoHandler(deps: Deps): void {
 				// Download / cache failure is a setup error, not a turn error
 				// — surface it directly without going through runTurn (which
 				// would call endTurn on a chat that never started a turn).
+				//
+				// NOTE: we deliberately did NOT materialize a ChatSession yet
+				// (registry.get is below); otherwise a chat that only ever
+				// sent failed-download photos would accumulate idle sessions
+				// in the registry for the bot's lifetime.
 				log.error("download_failed", {
 					chat_id: chatId,
 					err: String(err),
@@ -68,6 +72,7 @@ export function installPhotoHandler(deps: Deps): void {
 				return;
 			}
 
+			const chat = deps.registry.get(chatId, threadId);
 			await runTurn({
 				bot: deps.bot,
 				chat,

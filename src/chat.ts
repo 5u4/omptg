@@ -424,7 +424,21 @@ export class ChatSession {
 				const msg = (event as { message?: { role?: string; content?: unknown } }).message;
 				if (!msg || msg.role !== "assistant") break;
 				const text = extractAssistantText(msg.content);
-				if (text) this.pendingAssistantText = text;
+				if (text) {
+					this.pendingAssistantText = text;
+				} else if (Array.isArray(msg.content) && msg.content.length > 0) {
+					// Non-empty content array that yielded zero visible text:
+					// either it's pure tool-calls / thinking blocks (benign,
+					// the next tool_execution_start handles it) OR the SDK
+					// changed its content shape and our extractor missed it
+					// (catastrophic — the user's reply silently vanishes).
+					// Surface enough to diagnose without flooding logs.
+					this.log.warn("message_end.empty_text", {
+						content_types: msg.content
+							.map(c => (c as { type?: unknown })?.type ?? typeof c)
+							.slice(0, 8),
+					});
+				}
 				break;
 			}
 			case "tool_execution_start": {

@@ -119,9 +119,16 @@ export class PendingVoiceStore {
 	}
 
 	private evictExpired(now: number): void {
+		// Two-step so we don't delete from the Map we're iterating; the JS
+		// spec allows it, but the iterator's "stable across mutation"
+		// behavior is subtle (current-entry deletion is fine, but
+		// surrounding shape edits aren't) and it's easier to reason about
+		// the snapshot.
+		const stale: string[] = [];
 		for (const [id, entry] of this.byId) {
-			if (now - entry.createdAt > this.ttlMs) this.delete(id);
+			if (now - entry.createdAt > this.ttlMs) stale.push(id);
 		}
+		for (const id of stale) this.delete(id);
 	}
 }
 
