@@ -54,6 +54,35 @@ function extractAssistantText(content: unknown): string {
 }
 
 /**
+ * Extra system-prompt block injected on every ChatSession we spawn.
+ * Telegram MarkdownV2 has no table syntax; we wrap tables in code
+ * fences as a safety net, but mobile-screen wrapping makes that ugly,
+ * so we ask the model to prefer lists / key:value lines / inline prose
+ * for small data sets. Appended AFTER the SDK defaults.
+ */
+const TELEGRAM_SYSTEM_BLOCK = [
+	"# Telegram output guidance",
+	"",
+	"You are talking to the user through a Telegram bot, not a terminal or IDE.",
+	"Telegram MarkdownV2 supports headings, bold/italic, inline code, fenced",
+	"code blocks, links, and lists — but NOT tables, and NOT wide ASCII",
+	"diagrams. Both wrap poorly on phone screens.",
+	"",
+	"For comparisons / option matrices / small data sets, prefer:",
+	"  - a markdown list with a one-line summary per item, OR",
+	"  - `key: value` lines under a short heading, OR",
+	"  - a compact paragraph that names the trade-offs inline.",
+	"",
+	"Only use a GFM table when the data genuinely has 3+ columns AND",
+	"the user explicitly asked for a table. Otherwise the bot wraps the",
+	"table in a code fence as a fallback, which is ugly on mobile.",
+].join("\n");
+
+function withTelegramPrompt(defaults: string[]): string[] {
+	return [...defaults, TELEGRAM_SYSTEM_BLOCK];
+}
+
+/**
  * First user-typed prompt in a session's history. Used by /retitle (no
  * args) to give the title-generator something to work with after a
  * resume — when `firstUserText` from the in-memory turn loop is undefined
@@ -179,6 +208,7 @@ export class ChatSession {
 				cwd: manager.getCwd(),
 				sessionManager: manager,
 				hasUI: true,
+				systemPrompt: withTelegramPrompt,
 			});
 			this.cwd = manager.getCwd();
 			this.attach(created.session, created.setToolUIContext);
@@ -212,10 +242,11 @@ export class ChatSession {
 		await this.dispose();
 		const manager = await SessionManager.open(sessionPath);
 		const created = await createAgentSession({
-			cwd: manager.getCwd(),
-			sessionManager: manager,
-			hasUI: true,
-		});
+				cwd: manager.getCwd(),
+				sessionManager: manager,
+				hasUI: true,
+				systemPrompt: withTelegramPrompt,
+			});
 		this.cwd = manager.getCwd();
 		this.attach(created.session, created.setToolUIContext);
 		return created.session;
@@ -245,10 +276,11 @@ export class ChatSession {
 			SessionManager.getDefaultSessionDir(this.cwd),
 		);
 		const created = await createAgentSession({
-			cwd: this.cwd,
-			sessionManager: manager,
-			hasUI: true,
-		});
+				cwd: this.cwd,
+				sessionManager: manager,
+				hasUI: true,
+				systemPrompt: withTelegramPrompt,
+			});
 		if (created.modelFallbackMessage) {
 			console.warn(
 				`[chat ${this.chatId}] ${created.modelFallbackMessage}`,
