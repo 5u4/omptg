@@ -11,8 +11,9 @@
  *   `tool_execution_end`. Concurrent tools are matched by `toolCallId`.
  * - Transient notices (auto_retry, etc.) are posted as their own
  *   sendMessage so they also live in the history.
- * - finalize() never deletes messages. The only thing it ensures is that
- *   a turn with zero assistant text still emits a `(no response)` reply.
+ * - finalize() never deletes messages and never posts a placeholder. If a
+ *   turn produced no assistant text, the tool messages alone tell the
+ *   story; a bare "(no response)" line was just noise in chat.
  *
  * Telegram caps a single message at 4096 chars; long assistant replies
  * are split at the last newline within budget (or a hard split if no
@@ -36,7 +37,6 @@ function withResultIcon(startLine: string, icon: "✅" | "❌"): string {
 export class TelegramStreamer {
 	/** message_id of the in-flight tool status, keyed by toolCallId. */
 	private readonly toolMsgs = new Map<string, { messageId: number; startLine: string }>();
-	private committedAny = false;
 	private finalized = false;
 
 	constructor(
@@ -58,7 +58,7 @@ export class TelegramStreamer {
 		for (const chunk of splitMarkdownForTelegram(trimmed)) {
 			await this.sendMarkdown(chunk);
 		}
-		this.committedAny = true;
+
 	}
 
 	/** New tool started: post a persistent status message for it. */
@@ -133,11 +133,11 @@ export class TelegramStreamer {
 		if (this.finalized) return;
 		this.finalized = true;
 		// Anything still "in-flight" at finalize had no end event — leave the
-		// start message as-is rather than guessing a result icon.
+		// start message as-is rather than guessing a result icon. We also do
+		// NOT post a placeholder when the turn produced no assistant text:
+		// the tool messages already show what happened, and a bare
+		// "(no response)" line was just noise.
 		this.toolMsgs.clear();
-		if (!this.committedAny) {
-			await this.send("(no response)");
-		}
 	}
 
 	/** Surface an error after a turn fails: send verbatim text. */

@@ -117,15 +117,14 @@ async function main() {
 		console.log("✓ per-tool messages rewritten in place, none deleted");
 	}
 
-	// --- Case 4: empty turn → "(no response)" fallback. ---
+	// --- Case 4: empty turn → silent finalize, NO placeholder sent. ---
 	{
 		const { bot, sends, deletes } = makeFakeBot();
 		const streamer = new TelegramStreamer(bot, 1);
 		await streamer.finalize();
-		assert(sends.length === 1 && sends[0]!.text === "(no response)",
-			"expected (no response) placeholder");
+		assert(sends.length === 0, `empty turn must stay silent, got ${sends.length} sends`);
 		assert(deletes.length === 0, "nothing to delete on bare finalize");
-		console.log("✓ empty turn yields (no response)");
+		console.log("✓ empty turn stays silent");
 	}
 
 	// --- Case 5: an in-flight tool at finalize stays as its start line. ---
@@ -134,8 +133,8 @@ async function main() {
 		const streamer = new TelegramStreamer(bot, 1);
 		await streamer.toolStart("call-x", "🔍 search /todo/ in src");
 		await streamer.finalize();
-		assert(sends.length === 2,
-			`expected start + no-response, got ${sends.length}`);
+		assert(sends.length === 1,
+			`expected only the tool start, got ${sends.length}`);
 		assert(sends[0]!.text === "🔍 search /todo/ in src", "start line missing");
 		assert(edits.length === 0, "no end event → no edit");
 		assert(deletes.length === 0, "nothing should be deleted");
@@ -173,14 +172,12 @@ async function main() {
 		await streamer.commitPreamble(long);
 		await streamer.commitPreamble("short note");
 		await streamer.finalize();
-		// finalize sees committedAny=false (preambles don't count) → emits (no response)
-		assert(sends.length === 3, `expected 2 preambles + no-response, got ${sends.length}`);
+		assert(sends.length === 2, `expected 2 preambles only, got ${sends.length}`);
 		assert(sends[0]!.text.startsWith("💭 "), "preamble missing prefix");
 		assert(sends[0]!.text.endsWith("…"), "long preamble should be ellipsized");
 		assert(sends[0]!.text.length < long.length, "long preamble not truncated");
 		assert(sends[1]!.text === "💭 short note", "short preamble verbatim");
-		assert(sends[2]!.text === "(no response)", "preamble alone shouldn't satisfy committedAny");
-		console.log("✓ preamble truncates + does not satisfy committedAny");
+		console.log("✓ preamble truncates, no placeholder fallback");
 	}
 
 	// --- Case 9: chrome is silent, assistant reply notifies. ---
