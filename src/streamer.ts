@@ -45,6 +45,15 @@ const PREAMBLE_LEN = 80;
  */
 const ACTIVITY_CHAR_CAP = 3500;
 const ACTIVITY_LINE_CAP = 25;
+/**
+ * Debounce window for activity-message edits. Tool start/end + preamble
+ * + notice events can fire many times per second; without coalescing,
+ * each one triggers an `editMessageText` and we burn through telegram's
+ * per-chat edit budget (autoRetry then stalls the chain waiting on
+ * `retry_after`). 250ms is short enough to feel live, long enough to
+ * collapse a burst of toolStart/toolEnd pairs into one network call.
+ */
+const FLUSH_DEBOUNCE_MS = 250;
 
 /** Replace the leading status emoji (start-of-tool icon) with a result one. */
 function withResultIcon(startLine: string, icon: "✅" | "❌"): string {
@@ -66,6 +75,18 @@ interface ActivityMessage {
 	/** Sum of line lengths + newline joins; cached so cap checks are O(1). */
 	charCount: number;
 	renderedText: string;
+	/**
+	 * In-flight debounced flush. Resolves after the next `editMessageText`
+	 * completes (or immediately, when the buffer was already in sync).
+	 * `finalize()` awaits this so the final ✅/❌ frame always lands.
+	 */
+	pendingFlush: Promise<void> | null;
+	/**
+	 * Trigger function that runs the pending flush immediately (cancelling
+	 * its timer). drainHost calls this so finalize doesn't sit on the
+	 * debounce window. `null` whenever `pendingFlush` is `null`.
+	 */
+	pendingFlushRun: (() => Promise<void>) | null;
 }
 
 export class TelegramStreamer {
@@ -102,6 +123,20 @@ export class TelegramStreamer {
 	 * the whole reply.
 	 */
 	private tail: Promise<void> = Promise.resolve();
+	/**
+	 * Per-host pending debounce timer. While a timer is live, additional
+	 * appends just update `host.lines` — the eventual `flushActivityNow`
+	 * reads the latest snapshot. Keyed by host so a sealed message with
+	 * an outstanding edit (e.g. a late toolEnd rewrite) still completes
+	 * independently of the active one.
+	 */
+	private readonly flushHostTimers = new Map<ActivityMessage, ReturnType<typeof setTimeout>>();
+	/**
+	 * In-flight flush promises (post-timer, mid `editMessageText`). Drain
+	 * helpers await these so finalize / replaceWith can't return while an
+	 * edit is still in transit.
+	 */
+	private readonly inflightFlushes = new Set<Promise<void>>();
 
 	constructor(
 		private readonly bot: Bot,
@@ -189,7 +224,7 @@ export class TelegramStreamer {
 			: withResultIcon(current, "✅");
 		if (next === current) return;
 		entry.host.lines[entry.lineIndex] = next;
-		await this.flushActivity(entry.host);
+		this.scheduleFlush(entry.host);
 	}
 
 	/** One-shot informational line (retries, notices). Coalesced into the
@@ -238,7 +273,7 @@ export class TelegramStreamer {
 			const lineIndex = cur.lines.length;
 			cur.lines.push(line);
 			cur.charCount += 1 + line.length;
-			await this.flushActivity(cur);
+			this.scheduleFlush(cur);
 			return { host: cur, lineIndex };
 		}
 		// Open a fresh activity message. Sealing the previous one is just
@@ -255,6 +290,8 @@ export class TelegramStreamer {
 				lines: [line],
 				charCount: line.length,
 				renderedText: line,
+				pendingFlush: null,
+				pendingFlushRun: null,
 			};
 			this.activity = host;
 			return { host, lineIndex: 0 };
@@ -265,11 +302,94 @@ export class TelegramStreamer {
 	}
 
 	/**
-	 * Re-render `host.lines` and `editMessageText` if the result differs
-	 * from what we last sent for that message. No-op when nothing changed
-	 * (avoids telegram's "message is not modified" 400s).
+	 * Coalesce rapid edits into one network call. Multiple appends within
+	 * `FLUSH_DEBOUNCE_MS` collapse into a single `editMessageText` carrying
+	 * the latest `lines` snapshot — saves edit budget and avoids waking
+	 * autoRetry's `retry_after` backoff. Returns the promise that resolves
+	 * after the scheduled edit completes, so `finalize()` can await every
+	 * outstanding host and know the final ✅/❌ frame has landed.
 	 */
-	private async flushActivity(host: ActivityMessage): Promise<void> {
+	private scheduleFlush(host: ActivityMessage): Promise<void> {
+		// Branch on `pendingFlushRun`, not `pendingFlush`: once the timer
+		// fires `pendingFlushRun` clears immediately, but `pendingFlush`
+		// stays set until the `editMessageText` resolves. A post-timer
+		// append should NOT attach to that in-flight edit (the snapshot
+		// may already be on the wire) — it needs its own fresh debounce
+		// to guarantee delivery. Within the debounce window, however,
+		// `host.lines` mutations are picked up by the same pending run
+		// (the snapshot is taken inside `flushActivityNow`, after the
+		// timer elapses) so we can safely return the existing promise.
+		if (host.pendingFlushRun) return host.pendingFlush!;
+		let runOnce: () => Promise<void>;
+		const p = new Promise<void>(resolve => {
+			let done = false;
+			runOnce = async () => {
+				if (done) return;
+				done = true;
+				const t = this.flushHostTimers.get(host);
+				if (t !== undefined) {
+					clearTimeout(t);
+					this.flushHostTimers.delete(host);
+				}
+				// Null `pendingFlushRun` immediately so a concurrent append
+				// during the await opens a fresh debounce. Keep `pendingFlush`
+				// set until the edit actually settles so `finalize` / drain
+				// can await the in-flight network call rather than racing it.
+				host.pendingFlushRun = null;
+				try { await this.flushActivityNow(host); }
+				finally {
+					host.pendingFlush = null;
+					this.inflightFlushes.delete(p);
+					resolve();
+				}
+			};
+			const timer = setTimeout(() => { void runOnce(); }, FLUSH_DEBOUNCE_MS);
+			this.flushHostTimers.set(host, timer);
+		});
+		host.pendingFlush = p;
+		host.pendingFlushRun = runOnce!;
+		this.inflightFlushes.add(p);
+		return p;
+	}
+
+	/**
+	 * Fire any pending debounce timer for `host` immediately and await
+	 * the resulting flush. Safe to call when the timer has already fired
+	 * — we fall through to awaiting the in-flight `pendingFlush` promise.
+	 */
+	private async drainHost(host: ActivityMessage): Promise<void> {
+		const run = host.pendingFlushRun;
+		if (run) await run();
+		else if (host.pendingFlush) await host.pendingFlush;
+	}
+
+	/**
+	 * Drain all pending and in-flight activity flushes. Tests use this to
+	 * observe edit counts at known points; `finalize` calls it before
+	 * flipping its sentinel. Loops until no work remains because draining
+	 * one host's in-flight edit can complete after a new schedule appeared
+	 * on another host (the chain awaits this, so no infinite loop).
+	 */
+	async flushPending(): Promise<void> {
+		while (this.flushHostTimers.size > 0 || this.inflightFlushes.size > 0) {
+			// Fire any not-yet-elapsed timers synchronously.
+			for (const host of [...this.flushHostTimers.keys()]) await this.drainHost(host);
+			// Then await any edits that were already past the timer.
+			if (this.inflightFlushes.size > 0) {
+				await Promise.allSettled([...this.inflightFlushes]);
+			}
+		}
+	}
+
+	/**
+	 * Re-render `host.lines` and `editMessageText` if the result differs
+	 * from what we last sent. No-op when nothing changed (avoids telegram's
+	 * "message is not modified" 400s). On failure we leave `renderedText`
+	 * stale so the next append sees a real diff and retries — otherwise a
+	 * transient edit failure would leave the chat pinned to an outdated
+	 * frame (e.g. tool stuck at 📖 after toolEnd).
+	 */
+	private async flushActivityNow(host: ActivityMessage): Promise<void> {
 		const text = host.lines.join("\n");
 		if (text === host.renderedText) return;
 		try {
@@ -308,6 +428,11 @@ export class TelegramStreamer {
 			// Tail's own catch already logged; swallow here so finalize is
 			// truly idempotent and safe in a shutdown path.
 		}
+		// Drain every debounced and in-flight activity flush before flipping
+		// the sentinel — otherwise a `runOnce` already past its timer would
+		// land its edit AFTER the caller (`ChatSession.dispose`) treats the
+		// streamer as done.
+		await this.flushPending();
 		this.finalized = true;
 		// Anything still "in-flight" at finalize had no end event — leave the
 		// start message as-is rather than guessing a result icon. We also do
@@ -321,10 +446,19 @@ export class TelegramStreamer {
 	/** Surface an error after a turn fails: send verbatim text. */
 	async replaceWith(text: string): Promise<void> {
 		this.finalized = true;
+		// Cancel timers that haven't fired yet, then await any flush that's
+		// already mid-`editMessageText` so it can't land AFTER the error
+		// message and visually continue the rolling activity past the error.
+		for (const timer of this.flushHostTimers.values()) clearTimeout(timer);
+		this.flushHostTimers.clear();
+		if (this.inflightFlushes.size > 0) {
+			await Promise.allSettled([...this.inflightFlushes]);
+		}
 		this.toolMsgs.clear();
 		this.activity = null;
 		await this.send(text);
 	}
+
 
 	private async send(text: string, opts?: { silent?: boolean; replyTo?: number }): Promise<void> {
 		try {
