@@ -71,6 +71,16 @@ export class ChatSession {
 	 *  Prevents re-running auto-resume after the user explicitly /new'd
 	 *  away from the recovered session — we only try once on cold boot. */
 	private autoResumeTried = false;
+	/**
+	 * Most recent assistant message_end text, NOT yet sent. We delay the
+	 * send because the model often emits "I'll read X then edit Y" as a
+	 * standalone assistant message right before calling a tool — flushing
+	 * that verbatim is the dogfooding complaint. Resolution:
+	 *  - tool_execution_start arrives → it was a preamble → truncated heartbeat
+	 *  - agent_end arrives          → it was the final reply → full chunked send
+	 *  - dispose/endTurn safety net → final send (covers crashed turns)
+	 */
+	private pendingAssistantText: string | undefined;
 
 	constructor(opts: ChatSessionOptions) {
 		this.chatId = opts.chatId;
@@ -189,6 +199,7 @@ export class ChatSession {
 		}
 		this.streamer = undefined;
 		this.firstUserText = undefined;
+		this.pendingAssistantText = undefined;
 		this.titleAttempted = false;
 	}
 
@@ -222,6 +233,7 @@ export class ChatSession {
 		// Resuming a session preloads sessionName; don't try to generate again.
 		this.titleAttempted = Boolean(session.sessionName);
 		this.firstUserText = undefined;
+		this.pendingAssistantText = undefined;
 		this.log.info("session.attached", {
 			session_id: session.sessionId,
 			cwd: this.cwd,
@@ -258,6 +270,12 @@ export class ChatSession {
 	 *  reply even if the agent produced none). Idempotent. */
 	async endTurn(): Promise<void> {
 		this.typing.stop();
+		// Belt + suspenders: if agent_end never fired (crash, abort, etc.)
+		// the pending assistant text would otherwise be lost. Flush it here
+		// as the final reply so the user still sees something.
+		const final = this.pendingAssistantText;
+		this.pendingAssistantText = undefined;
+		if (this.streamer && final) await this.streamer.commitAssistant(final);
 		await this.streamer?.finalize();
 	}
 
@@ -277,21 +295,34 @@ export class ChatSession {
 		switch (event.type) {
 			// Text deltas are intentionally ignored. The previous design
 			// streamed every token into a placeholder message, which surfaced
-			// a lot of mid-turn reasoning prose to the chat. We now commit
-			// the assistant text once at `message_end`, leaving the typing
-			// indicator + tool status line as the only mid-turn signal.
+			// a lot of mid-turn reasoning prose to the chat.
+			//
+			// `message_end` text is BUFFERED (not committed) because OMP fires
+			// one message_end per assistant message, and a turn typically
+			// looks like: assistant prose → tool → tool → assistant prose →
+			// tool → … → final assistant prose → agent_end. The non-final
+			// prose blocks are "preambles" the user doesn't need verbatim.
+			// We flush at the next tool_execution_start (as a one-line
+			// heartbeat) or at agent_end (as the full reply).
 			case "message_end": {
 				const msg = (event as { message?: { role?: string; content?: unknown } }).message;
-				if (!msg || msg.role !== "assistant" || !s) break;
+				if (!msg || msg.role !== "assistant") break;
 				const text = extractAssistantText(msg.content);
-				if (text) void s.commitAssistant(text);
+				if (text) this.pendingAssistantText = text;
 				break;
 			}
 			case "tool_execution_start": {
 				const ev = event as { toolCallId?: string; toolName?: string; args?: unknown };
-				if (s && ev.toolCallId && ev.toolName) {
-					void s.toolStart(ev.toolCallId, renderToolStart(ev.toolName, ev.args));
-				}
+				if (!s || !ev.toolCallId || !ev.toolName) break;
+				const pre = this.pendingAssistantText;
+				this.pendingAssistantText = undefined;
+				const line = renderToolStart(ev.toolName, ev.args);
+				const id = ev.toolCallId;
+				// Serialize preamble→tool so order is deterministic in chat.
+				void (async () => {
+					if (pre) await s.commitPreamble(pre);
+					await s.toolStart(id, line);
+				})();
 				break;
 			}
 			case "tool_execution_end": {
@@ -321,6 +352,10 @@ export class ChatSession {
 			}
 			case "agent_end": {
 				this.typing.stop();
+				// Whatever's still pending is the final assistant reply.
+				const final = this.pendingAssistantText;
+				this.pendingAssistantText = undefined;
+				if (s && final) void s.commitAssistant(final);
 				this.maybeGenerateTitle();
 				break;
 			}

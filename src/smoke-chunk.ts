@@ -157,6 +157,24 @@ async function main() {
 		for (const c of chunks) assert(c.length <= 4096, `chunk too big: ${c.length}`);
 		console.log(`✓ splitForTelegram produced ${chunks.length} chunks`);
 	}
+
+	// --- Case 8: commitPreamble truncates long text + adds 💭 prefix. ---
+	{
+		const { bot, sends } = makeFakeBot();
+		const streamer = new TelegramStreamer(bot, 1);
+		const long = "I'll read the file then make the edit because ".repeat(20);
+		await streamer.commitPreamble(long);
+		await streamer.commitPreamble("short note");
+		await streamer.finalize();
+		// finalize sees committedAny=false (preambles don't count) → emits (no response)
+		assert(sends.length === 3, `expected 2 preambles + no-response, got ${sends.length}`);
+		assert(sends[0]!.text.startsWith("💭 "), "preamble missing prefix");
+		assert(sends[0]!.text.endsWith("…"), "long preamble should be ellipsized");
+		assert(sends[0]!.text.length < long.length, "long preamble not truncated");
+		assert(sends[1]!.text === "💭 short note", "short preamble verbatim");
+		assert(sends[2]!.text === "(no response)", "preamble alone shouldn't satisfy committedAny");
+		console.log("✓ preamble truncates + does not satisfy committedAny");
+	}
 }
 
 main().catch(err => {

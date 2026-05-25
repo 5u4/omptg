@@ -21,6 +21,8 @@
 import type { Bot } from "grammy";
 
 const MAX_MESSAGE_LEN = 4096;
+/** Truncation budget for mid-turn assistant preambles (one-line heartbeat). */
+const PREAMBLE_LEN = 80;
 
 /** Replace the leading status emoji (start-of-tool icon) with a result one. */
 function withResultIcon(startLine: string, icon: "✅" | "❌"): string {
@@ -96,6 +98,24 @@ export class TelegramStreamer {
 	async notice(line: string): Promise<void> {
 		if (this.finalized || !line) return;
 		await this.send(line);
+	}
+
+	/**
+	 * Mid-turn "preamble" assistant text: the model said something before
+	 * calling a tool. Show a short heartbeat (first PREAMBLE_LEN chars +
+	 * ellipsis if truncated) so the user feels progress without flooding
+	 * the chat with mid-turn reasoning prose. Never chunked.
+	 */
+	async commitPreamble(text: string): Promise<void> {
+		if (this.finalized) return;
+		const trimmed = text.trim();
+		if (!trimmed) return;
+		const line = trimmed.length > PREAMBLE_LEN
+			? `💭 ${trimmed.slice(0, PREAMBLE_LEN).trimEnd()}…`
+			: `💭 ${trimmed}`;
+		await this.send(line);
+		// Preambles don't count toward "did we say anything"; the real
+		// reply at agent_end is what satisfies the (no response) guard.
 	}
 
 	async finalize(): Promise<void> {
