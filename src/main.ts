@@ -1,5 +1,5 @@
 /**
- * omp-tg entrypoint.
+ * omptg entrypoint.
  *
  * Wires telegram (grammY) to per-chat ChatSession instances. See chat.ts
  * for the per-chat runtime and ui-bridge.ts for the inline-keyboard /
@@ -34,7 +34,7 @@ const log = scoped("main");
 const TOKEN = required("TELEGRAM_BOT_TOKEN");
 // OMP_DEFAULT_CWD is optional. Resolution order:
 //   1. env OMP_DEFAULT_CWD (must exist on disk if set)
-//   2. ~/.omp-tg/ (auto-created if missing)
+//   2. ~/.omptg/ (auto-created if missing)
 // Per-chat /bind values still override on a per-chat basis. The effective
 // path + source is logged at boot.start so it's never a mystery.
 const DEFAULT_CWD = resolveDefaultCwd();
@@ -57,7 +57,7 @@ function required(key: string): string {
 function resolveDefaultCwd(): string {
 	const env = Bun.env.OMP_DEFAULT_CWD;
 	if (env) return resolveDir(env);
-	const fallback = resolvePath(homedir(), ".omp-tg");
+	const fallback = resolvePath(homedir(), ".omptg");
 	// mkdirSync({recursive:true}) is a no-op if it already exists.
 	mkdirSync(fallback, { recursive: true });
 	return fallback;
@@ -76,8 +76,8 @@ const bot = new Bot(TOKEN);
 const chatStore = new ChatStore();
 const registry = new ChatRegistry(bot, DEFAULT_CWD, chatStore);
 const pendingVoice = new PendingVoiceStore();
-const STT_MODEL = Bun.env.OMP_TG_STT_MODEL || "base";
-const STT_LANGUAGE = Bun.env.OMP_TG_STT_LANG || "en";
+const STT_MODEL = Bun.env.OMPTG_STT_MODEL || "base";
+const STT_LANGUAGE = Bun.env.OMPTG_STT_LANG || "en";
 
 // Log every inbound update before any guards so we can see callback_query
 // updates even when the allow-list later drops them.
@@ -154,7 +154,7 @@ bot.use(async (ctx, next) => {
 bot.command("start", ctx =>
 	ctx.reply(
 		[
-			"omp-tg up.",
+			"omptg up.",
 			`cwd: ${DEFAULT_CWD}`,
 			"",
 			"send any text to chat with the agent",
@@ -338,7 +338,7 @@ bot.command("bind", async ctx => {
 		await ctx.reply(
 			[
 				"usage: /bind <path> [|label]",
-				"  e.g. /bind ~/Workspaces/omp-tg",
+				"  e.g. /bind ~/Workspaces/omptg",
 				"  e.g. /bind ~/Workspaces/foo|foo dev",
 				"",
 				"the new cwd takes effect on the next /new — the current session keeps its cwd",
@@ -655,7 +655,7 @@ function knownCommands(): Set<string> {
 // long-context default (e.g. claude-opus-4.7-1m-internal) is text-only
 // even when claude-opus-4.7 base is multimodal.
 //
-// Instead: download the photo to ~/.omp-tg/image-cache/<uuid>.<ext> and
+// Instead: download the photo to ~/.omptg/image-cache/<uuid>.<ext> and
 // hand the main agent a *text* prompt referencing the local path. The
 // main agent already has the `inspect_image` tool (OMP built-in), which
 // resolves modelRoles.vision and runs an out-of-band vision call with a
@@ -1007,15 +1007,15 @@ process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
 log.info("boot.start", {
 	default_cwd: DEFAULT_CWD,
-	default_cwd_source: Bun.env.OMP_DEFAULT_CWD ? "env" : "fallback:~/.omp-tg",
+	default_cwd_source: Bun.env.OMP_DEFAULT_CWD ? "env" : "fallback:~/.omptg",
 	allowed_chats: [...ALLOWED],
 	log_file: logPath(),
 });
 
 // Prune old structured logs. Cheap; runs once per boot. The active
 // file (today's) is always skipped — see log-rotate.ts.
-const LOG_RETAIN_DAYS = Number(Bun.env.OMP_TG_LOG_RETAIN_DAYS ?? 30);
-const LOG_COMPRESS_AFTER_DAYS = Number(Bun.env.OMP_TG_LOG_COMPRESS_AFTER_DAYS ?? 7);
+const LOG_RETAIN_DAYS = Number(Bun.env.OMPTG_LOG_RETAIN_DAYS ?? 30);
+const LOG_COMPRESS_AFTER_DAYS = Number(Bun.env.OMPTG_LOG_COMPRESS_AFTER_DAYS ?? 7);
 try {
 	const result = await rotateLogs(logDir(), logPath(), {
 		retainDays: LOG_RETAIN_DAYS,

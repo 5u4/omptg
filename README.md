@@ -17,7 +17,7 @@ Bridges a Telegram chat to OMP's `AgentSession` SDK in-process — no `omp --mod
 
 - **Native UI mapping** 🎛️ — agent `confirm` / `select` / `input` / `editor` arrive as inline keyboards or text-reply prompts, not auto-rejected RPC frames
 - **Streaming replies** ✍️ — throttled inline message edits as tokens arrive; per-tool status line (`📖 read foo.ts`, `💻 bash: …`, `❌ bash failed: …`)
-- **Per-chat cwd binding** 📌 — pin any chat (or forum topic) to a project directory; persisted to `~/.omp-tg/chats.json`
+- **Per-chat cwd binding** 📌 — pin any chat (or forum topic) to a project directory; persisted to `~/.omptg/chats.json`
 - **Voice input** 🎙️ — voice / audio messages → ffmpeg → local whisper → confirm-before-send keyboard
 - **Auth that fits group chats** 🔐 — allow-list by user id OR chat id; one user id covers DMs + every group you're in
 - **Auto session titles** 🏷️ — OMP's `smol` role names sessions for `/sessions`
@@ -69,7 +69,7 @@ All variables live in `.env` (auto-loaded by Bun). See [`.env.example`](./.env.e
 
 **Required:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHATS`.
 
-**Optional:** `OMP_DEFAULT_CWD` · `OMP_TG_STT_MODEL` · `OMP_TG_STT_LANG` · `OMP_TG_LOG_RETAIN_DAYS` · `OMP_TG_LOG_COMPRESS_AFTER_DAYS`.
+**Optional:** `OMP_DEFAULT_CWD` · `OMPTG_STT_MODEL` · `OMPTG_STT_LANG` · `OMPTG_LOG_RETAIN_DAYS` · `OMPTG_LOG_COMPRESS_AFTER_DAYS`.
 
 ## Production (PM2)
 
@@ -89,4 +89,4 @@ bun run pm2:stop
 
 After `save` + `startup`, the bot survives logouts, reboots, and its own crashes (auto-restart, capped at 10 restarts within 10s windows).
 
-**Logs.** Structured JSONL in `logs/<date>.log` (one event per line, `jq`-friendly), rotated on each boot: gzipped after `OMP_TG_LOG_COMPRESS_AFTER_DAYS` (default 7), deleted after `OMP_TG_LOG_RETAIN_DAYS` (default 30). PM2's own `pm2-out.log` / `pm2-err.log` aren't managed by us — install [`pm2-logrotate`](https://github.com/keymetrics/pm2-logrotate) if you care.
+**Logs.** Structured JSONL in `logs/<date>.log` (one event per line, `jq`-friendly), rotated on each boot: gzipped after `OMPTG_LOG_COMPRESS_AFTER_DAYS` (default 7), deleted after `OMPTG_LOG_RETAIN_DAYS` (default 30). PM2's own `pm2-out.log` / `pm2-err.log` aren't managed by us — install [`pm2-logrotate`](https://github.com/keymetrics/pm2-logrotate) if you care.

@@ -3,17 +3,17 @@
  *
  *   telegram voice/audio message  →  download .ogg/.m4a/etc into the
  *   voice cache  →  ffmpeg → 16 kHz mono WAV  →  openai-whisper running
- *   inside an isolated `uv` venv at ~/.omp-tg/whisper-venv/  →  text.
+ *   inside an isolated `uv` venv at ~/.omptg/whisper-venv/  →  text.
  *
  * The user sees the transcription with [send / cancel] buttons before
  * the text ever reaches the agent — misrecognition only costs a tap.
  *
- * Everything whisper-related lives under ~/.omp-tg/ so cleanup is "rm
- * -rf ~/.omp-tg" with no spillover into the system Python or the
+ * Everything whisper-related lives under ~/.omptg/ so cleanup is "rm
+ * -rf ~/.omptg" with no spillover into the system Python or the
  * user's other whisper consumers:
- *   - venv:           ~/.omp-tg/whisper-venv/
- *   - model weights:  ~/.omp-tg/whisper-models/whisper/      (via XDG_CACHE_HOME)
- *   - input cache:    ~/.omp-tg/voice-cache/
+ *   - venv:           ~/.omptg/whisper-venv/
+ *   - model weights:  ~/.omptg/whisper-models/whisper/      (via XDG_CACHE_HOME)
+ *   - input cache:    ~/.omptg/voice-cache/
  *
  * Requires `uv` (https://github.com/astral-sh/uv) and `ffmpeg` on PATH.
  * The venv + openai-whisper install is bootstrapped on first use; we
@@ -27,7 +27,7 @@ import { resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Bot } from "grammy";
 
-const OMP_HOME = resolvePath(homedir(), ".omp-tg");
+const OMP_HOME = resolvePath(homedir(), ".omptg");
 const CACHE_DIR = resolvePath(OMP_HOME, "voice-cache");
 const VENV_DIR = resolvePath(OMP_HOME, "whisper-venv");
 const MODEL_CACHE_DIR = resolvePath(OMP_HOME, "whisper-models");
@@ -169,7 +169,7 @@ print(result["text"].strip())
 let envReady: Promise<void> | undefined;
 
 /**
- * Bootstrap (or reuse) ~/.omp-tg/whisper-venv with openai-whisper installed.
+ * Bootstrap (or reuse) ~/.omptg/whisper-venv with openai-whisper installed.
  * Idempotent: a second concurrent caller awaits the same promise.
  */
 export function ensureWhisperEnv(): Promise<void> {
@@ -246,7 +246,7 @@ export async function transcribeAudio(audioPath: string, options?: TranscribeOpt
 			{
 				stdout: "pipe",
 				stderr: "pipe",
-				// Pin whisper's model cache under ~/.omp-tg so it's removable
+				// Pin whisper's model cache under ~/.omptg so it's removable
 				// with the rest of our state. XDG_CACHE_HOME → ~/.cache by
 				// default; whisper appends /whisper to whatever this resolves to.
 				env: { ...process.env, XDG_CACHE_HOME: MODEL_CACHE_DIR },

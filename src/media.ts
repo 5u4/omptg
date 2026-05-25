@@ -6,7 +6,7 @@
  * Hermes-style flow:
  *   1. Telegram delivers file_id for a PhotoSize.
  *   2. We resolve the file URL via getFile(), fetch bytes, write to
- *      `~/.omp-tg/image-cache/<uuid>.<ext>`, return the local path.
+ *      `~/.omptg/image-cache/<uuid>.<ext>`, return the local path.
  *   3. main.ts injects the path into the agent prompt as text
  *      ("[user attached image: /path/...]"); the main agent decides
  *      whether to call inspect_image with its own question.
@@ -21,7 +21,7 @@ import { resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Bot } from "grammy";
 
-const CACHE_DIR = resolvePath(homedir(), ".omp-tg", "image-cache");
+const CACHE_DIR = resolvePath(homedir(), ".omptg", "image-cache");
 /** Soft cap; pruning runs after every write that crosses this. */
 const MAX_CACHE_BYTES = 200 * 1024 * 1024; // 200 MB
 /** Hard per-file cap (decompression bombs / accidental huge forwards). */

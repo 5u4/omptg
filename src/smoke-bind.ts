@@ -9,8 +9,8 @@ import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import type { Bot } from "grammy";
 
-// Isolated store under a temp dir so we don't trash ~/.omp-tg/chats.json
-const storeDir = mkdtempSync(`${tmpdir()}/omp-tg-smoke-`);
+// Isolated store under a temp dir so we don't trash ~/.omptg/chats.json
+const storeDir = mkdtempSync(`${tmpdir()}/omptg-smoke-`);
 const storePath = resolvePath(storeDir, "chats.json");
 const store = new ChatStore(storePath);
 console.log(`store path: ${storePath}`);

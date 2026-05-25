@@ -8,7 +8,7 @@ let tmpDir: string;
 let storePath: string;
 
 beforeEach(() => {
-	tmpDir = mkdtempSync(join(tmpdir(), "omp-tg-store-"));
+	tmpDir = mkdtempSync(join(tmpdir(), "omptg-store-"));
 	storePath = join(tmpDir, "nested", "chats.json");
 });
 

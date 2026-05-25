@@ -1,5 +1,5 @@
 {
-  "name": "omp-tg",
+  "name": "omptg",
   "private": true,
   "type": "module",
   "scripts": {
@@ -7,10 +7,10 @@
     "smoke": "bun run src/smoke.ts",
     "typecheck": "tsc --noEmit",
     "pm2:start": "pm2 start ecosystem.config.cjs",
-    "pm2:restart": "pm2 restart omp-tg --update-env",
-    "pm2:stop": "pm2 stop omp-tg",
-    "pm2:logs": "pm2 logs omp-tg",
-    "pm2:status": "pm2 status omp-tg",
+    "pm2:restart": "pm2 restart omptg --update-env",
+    "pm2:stop": "pm2 stop omptg",
+    "pm2:logs": "pm2 logs omptg",
+    "pm2:status": "pm2 status omptg",
     "test": "bun test test/"
   },
   "devDependencies": {

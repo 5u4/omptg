@@ -1,5 +1,5 @@
 /**
- * Per-chat configuration store at `~/.omp-tg/chats.json`.
+ * Per-chat configuration store at `~/.omptg/chats.json`.
  *
  *   {
  *     "chats": {
@@ -50,7 +50,7 @@ interface ChatStoreFile {
 	chats: Record<string, ChatBinding>;
 }
 
-const DEFAULT_PATH = resolvePath(homedir(), ".omp-tg", "chats.json");
+const DEFAULT_PATH = resolvePath(homedir(), ".omptg", "chats.json");
 
 /** Expand a leading `~` to the user's home directory. */
 export function expandHome(path: string): string {
