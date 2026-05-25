@@ -155,6 +155,7 @@ bot.command("start", ctx =>
 			"/bind <path> [|label]   bind this chat to a cwd (effect: next /new)",
 			"/unbind   remove this chat's binding",
 			"/binding  show the active binding",
+			"/retitle [name]  rename session, or LLM-regen if no name",
 		].join("\n"),
 	),
 );
@@ -358,6 +359,29 @@ bot.command("resume", async ctx => {
 	} catch (err) {
 		await ctx.reply(`failed to resume: ${err instanceof Error ? err.message : err}`);
 	}
+});
+
+bot.command("retitle", async ctx => {
+	const chat = registry.get(ctx.chat.id);
+	if (!chat.hasSession) {
+		await ctx.reply("no active session — send a message or /new first");
+		return;
+	}
+	const arg = ctx.match?.trim();
+	if (arg) {
+		const ok = await chat.setTitle(arg);
+		await ctx.reply(ok ? `✓ renamed to: ${arg}` : "failed to rename");
+		return;
+	}
+	// No arg: regenerate via LLM. Show a placeholder so the user knows
+	// something is happening — the call takes a beat (one LLM round-trip).
+	await ctx.reply("regenerating title…");
+	const newTitle = await chat.regenerateTitle();
+	await ctx.reply(
+		newTitle
+			? `✓ renamed to: ${newTitle}`
+			: "couldn't regenerate (no user prompt in history, or generator returned null)",
+	);
 });
 
 // Inline-keyboard callbacks: route to the per-chat UI bridge.
@@ -615,6 +639,7 @@ const SLASH_COMMANDS = [
 	{ command: "bind",     description: "/bind <path> — pin this chat to a cwd" },
 	{ command: "unbind",   description: "Remove this chat's binding" },
 	{ command: "binding",  description: "Show the active binding" },
+	{ command: "retitle",  description: "/retitle [name] — rename current session, or regen via LLM if no name" },
 	{ command: "start",    description: "Show help" },
 ] as const;
 const COMMAND_SCOPES = [

@@ -28,6 +28,7 @@ to land in one session. Phases are loose — grab whatever feels useful.
 - PM2 supervision + `ecosystem.config.cjs`
 - chunked streaming past 4096-char telegram limit (seals prior msg, opens new one)
 - MarkdownV2 rendering for assistant replies (telegramify-markdown + fence-safe split)
+- `/retitle [name]` — rename session or LLM-regen via title-generator
 ---
 
 ## Priority 1 — paper cuts you'll hit fast
@@ -67,10 +68,6 @@ OMP has `session.runIdleCompaction()` (or similar — check
 
 **Files**: `src/main.ts`. Register in `SLASH_COMMANDS`.
 
-### P2.3 — `/retitle [new title]` to rename current session
-
-`session.setSessionName(name, "user")`. With no arg, force-rerun
-`generateSessionTitle` (regen).
 
 ### P2.4 — Voice input (whisper)
 

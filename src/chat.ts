@@ -52,6 +52,41 @@ function extractAssistantText(content: unknown): string {
 	return parts.join("").trim();
 }
 
+/**
+ * First user-typed prompt in a session's history. Used by /retitle (no
+ * args) to give the title-generator something to work with after a
+ * resume — when `firstUserText` from the in-memory turn loop is undefined
+ * because we never replayed the original prompt.
+ *
+ * User content can be a plain string (older entries) or a `MessageContent[]`
+ * with `{type:"text", text}` parts; cover both shapes.
+ */
+function extractFirstUserText(messages: readonly unknown[]): string | undefined {
+	for (const m of messages) {
+		if (!m || typeof m !== "object") continue;
+		const role = (m as { role?: unknown }).role;
+		if (role !== "user") continue;
+		const content = (m as { content?: unknown }).content;
+		if (typeof content === "string") {
+			const trimmed = content.trim();
+			if (trimmed) return trimmed;
+			continue;
+		}
+		if (Array.isArray(content)) {
+			const text = content
+				.filter((p): p is { type: string; text: string } =>
+					!!p && typeof p === "object"
+					&& (p as { type?: unknown }).type === "text"
+					&& typeof (p as { text?: unknown }).text === "string")
+				.map(p => p.text)
+				.join("")
+				.trim();
+			if (text) return text;
+		}
+	}
+	return undefined;
+}
+
 export class ChatSession {
 	readonly chatId: number;
 	cwd: string;
@@ -399,6 +434,50 @@ export class ChatSession {
 				log.warn("title.failed", { err: String(err) });
 			}
 		})();
+	}
+
+	/** Explicit user-supplied title. Persists to the session file as
+	 *  source="user". Returns false if there's no active session or the
+	 *  underlying setSessionName rejected. */
+	async setTitle(name: string): Promise<boolean> {
+		const session = this.session;
+		if (!session) return false;
+		const ok = await session.setSessionName(name, "user");
+		this.log.info("title.user_set", { title: name, ok });
+		// Treat a successful manual title as "we have a name now" so the
+		// auto-generator won't try to clobber it on the next turn.
+		if (ok) this.titleAttempted = true;
+		return ok;
+	}
+
+	/** Force a fresh LLM-generated title regardless of prior state. Returns
+	 *  the new title or undefined if no session, no first-message context,
+	 *  or the generator returned null. */
+	async regenerateTitle(): Promise<string | undefined> {
+		const session = this.session;
+		if (!session) return undefined;
+		const first = this.firstUserText ?? extractFirstUserText(session.messages);
+		if (!first) return undefined;
+		try {
+			const title = await generateSessionTitle(
+				first,
+				session.modelRegistry,
+				session.settings,
+				session.sessionId,
+				session.model,
+			);
+			if (!title) {
+				this.log.info("title.regen_skipped", { reason: "generator_returned_null" });
+				return undefined;
+			}
+			const ok = await session.setSessionName(title, "auto");
+			this.log.info("title.regen_set", { title, ok });
+			this.titleAttempted = true;
+			return ok ? title : undefined;
+		} catch (err) {
+			this.log.warn("title.regen_failed", { err: String(err) });
+			return undefined;
+		}
 	}
 }
 
