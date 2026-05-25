@@ -66,4 +66,24 @@ function assert(cond: unknown, msg: string): asserts cond {
 	console.log("✓ toMarkdownV2 escapes period");
 }
 
+// 6. GFM tables get wrapped in fenced code blocks so telegram doesn't
+//    try to parse raw `|` characters as entity delimiters.
+{
+	const src = "Intro\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\nOutro";
+	const out = splitMarkdownForTelegram(src);
+	assert(out.length === 1, "should fit one chunk");
+	const md = out[0]!.md;
+	// The table lines must be inside ``` ... ```. After wrapping, the
+	// pipe characters MUST NOT be escaped (\|) because they're now in
+	// a code block.
+	assert(md.includes("```"), "expected fence around table");
+	assert(!md.includes("\\|"), `pipes leaked outside code block: ${md}`);
+	// Header row should still be visible as monospace text.
+	assert(md.includes("| A"), `header row missing: ${md}`);
+	// Fence count is even (balanced).
+	const fences = (md.match(/```/g) ?? []).length;
+	assert(fences % 2 === 0, `unbalanced fences: ${fences}`);
+	console.log("✓ tables wrapped in fences, pipes not escaped");
+}
+
 console.log("all markdown smokes OK");

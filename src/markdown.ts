@@ -27,6 +27,46 @@ const MAX_MESSAGE_LEN = 4096;
 const FENCE_RE = /^ {0,3}```(.*)$/;
 
 /**
+ * Detect GFM table blocks (`| col | col |` header, `| --- | --- |` separator,
+ * then ≥1 data rows) and wrap them in a fenced code block so telegram
+ * renders them as monospace + skips entity parsing inside them.
+ *
+ * Why: telegram MarkdownV2 has no table syntax. telegramify-markdown
+ * passes tables through verbatim, leaving raw `|` characters that
+ * telegram tries to parse as spoiler delimiters → "can't parse entities"
+ * 400. Wrapping in ``` makes them safe AND keeps column alignment so
+ * the user can still read the table.
+ */
+function fenceTables(src: string): string {
+	const lines = src.split("\n");
+	const out: string[] = [];
+	let i = 0;
+	while (i < lines.length) {
+		const header = lines[i];
+		const sep = lines[i + 1];
+		const isTableStart =
+			header !== undefined && sep !== undefined
+			&& /^\s*\|.*\|\s*$/.test(header)
+			&& /^\s*\|?\s*:?-{2,}:?(\s*\|\s*:?-{2,}:?)+\s*\|?\s*$/.test(sep);
+		if (!isTableStart) {
+			out.push(header!);
+			i++;
+			continue;
+		}
+		// Collect header + sep + every following row that still looks like
+		// a table row ("|...|"). Blank line or non-row ends the table.
+		const block: string[] = [header!, sep!];
+		i += 2;
+		while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i]!)) {
+			block.push(lines[i]!);
+			i++;
+		}
+		out.push("```", ...block, "```");
+	}
+	return out.join("\n");
+}
+
+/**
  * Split `text` into chunks of at most `budget` characters (after telegramify
  * conversion) such that fenced code blocks never span a chunk boundary.
  * Returns the MarkdownV2 strings ready to send.
@@ -53,7 +93,9 @@ export function splitMarkdownForTelegram(
 	text: string,
 	budget = MAX_MESSAGE_LEN,
 ): MarkdownChunk[] {
-	const lines = text.split("\n");
+	// Wrap GFM tables in code fences BEFORE line-walking so the fence-balance
+	// logic below treats them as ordinary fenced blocks.
+	const lines = fenceTables(text).split("\n");
 	const out: MarkdownChunk[] = [];
 	let buf: string[] = [];
 	let openInfo: string | null = null;
