@@ -151,6 +151,7 @@ bot.command("start", ctx =>
 			"/resume [n]  reopen session by 1-based index (default: most recent)",
 			"/status  show session id, model, cwd",
 			"/model [id]  switch model — no arg = pick from list (temporary, not persisted)",
+			"/compact [instructions]  manually compact context now",
 			"",
 			"chat → cwd binding",
 			"/whoami   show this chat's id, type, and binding",
@@ -205,6 +206,37 @@ bot.command("model", async ctx => {
 		return;
 	}
 	await ctx.reply(`model: ${picked.id}`);
+});
+
+bot.command("compact", async ctx => {
+	const chat = registry.get(ctx.chat.id);
+	const instructions = ctx.match?.trim() || undefined;
+	const res = await chat.compact(instructions);
+	switch (res.status) {
+		case "no-session":
+			await ctx.reply("no active session — nothing to compact");
+			return;
+		case "busy":
+			await ctx.reply("agent is streaming — /cancel first, then /compact");
+			return;
+		case "error":
+			await ctx.reply(`compact failed: ${res.message}`);
+			return;
+		case "ok": {
+			const before = res.tokensBefore.toLocaleString("en-US");
+			const after = res.tokensAfter === null ? "?" : res.tokensAfter.toLocaleString("en-US");
+			const win = res.contextWindow.toLocaleString("en-US");
+			const head = `✅ compacted: ${before} → ${after} tokens (window ${win})`;
+			// Telegram caps at 4096; summary can be long. Trim to keep the
+			// reply readable — full summary lives in the session file.
+			const SUMMARY_MAX = 1200;
+			const summary = res.summary.length > SUMMARY_MAX
+				? `${res.summary.slice(0, SUMMARY_MAX)}…`
+				: res.summary;
+			await ctx.reply(`${head}\n\n${summary}`);
+			return;
+		}
+	}
 });
 
 bot.command("cancel", async ctx => {
@@ -757,6 +789,7 @@ const SLASH_COMMANDS = [
 	{ command: "cancel",   description: "Abort the current turn (keeps session)" },
 	{ command: "status",   description: "Show session id, model, cwd" },
 	{ command: "model",    description: "Switch model — no arg opens picker" },
+	{ command: "compact",  description: "Manually compact session context" },
 	{ command: "whoami",   description: "Show this chat's id + binding" },
 	{ command: "bind",     description: "/bind <path> — pin this chat to a cwd" },
 	{ command: "unbind",   description: "Remove this chat's binding" },

@@ -563,6 +563,46 @@ export class ChatSession {
 		this.log.info("model.set", { id: model.id });
 		return model;
 	}
+
+	/** Manually compact the active session's context.
+	 *
+	 *  Returns a discriminated result so the caller can render specific
+	 *  user-facing messages without leaking errors. We refuse while the
+	 *  agent is streaming — OMP's auto-compaction handles in-flight
+	 *  overflow, and `session.compact()` would abort the live turn. */
+	async compact(
+		instructions?: string,
+	): Promise<
+		| { status: "no-session" }
+		| { status: "busy" }
+		| { status: "ok"; summary: string; tokensBefore: number; tokensAfter: number | null; contextWindow: number }
+		| { status: "error"; message: string }
+	> {
+		const session = this.session;
+		if (!session) return { status: "no-session" };
+		if (session.isStreaming) return { status: "busy" };
+		try {
+			const result = await session.compact(instructions);
+			const after = session.getContextUsage();
+			const summary = result.shortSummary?.trim() || result.summary.trim();
+			this.log.info("compact.ok", {
+				tokens_before: result.tokensBefore,
+				tokens_after: after?.tokens ?? null,
+				instructions: instructions ?? null,
+			});
+			return {
+				status: "ok",
+				summary,
+				tokensBefore: result.tokensBefore,
+				tokensAfter: after?.tokens ?? null,
+				contextWindow: after?.contextWindow ?? 0,
+			};
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.log.warn("compact.failed", { err: message });
+			return { status: "error", message };
+		}
+	}
 }
 
 export class ChatRegistry {
