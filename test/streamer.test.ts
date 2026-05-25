@@ -19,14 +19,18 @@ interface Stub {
 	bot: Bot;
 	sends: Sent[];
 	edits: Edited[];
-	/** Force the Nth (1-indexed) editMessageText call to throw the given error. */
-	failEdit(n: number, err: Error): void;
+	failEdit: (n: number, err: Error) => void;
+	/** Block the Nth edit call until the returned `release` is called.
+	 *  Use to simulate a slow `editMessageText` (autoRetry backoff, slow
+	 *  network) and observe drain semantics. */
+	gateEdit: (n: number) => { release: () => void };
 }
 
 function stubBot(): Stub {
 	const sends: Sent[] = [];
 	const edits: Edited[] = [];
 	const editFailures = new Map<number, Error>();
+	const editGates = new Map<number, Promise<void>>();
 	let id = 1000;
 	let editCalls = 0;
 	const api = {
@@ -42,6 +46,8 @@ function stubBot(): Stub {
 			opts?: Record<string, unknown>,
 		) => {
 			editCalls++;
+			const gate = editGates.get(editCalls);
+			if (gate) await gate;
 			const forced = editFailures.get(editCalls);
 			if (forced) throw forced;
 			edits.push({ chatId, messageId, text, opts });
@@ -53,20 +59,27 @@ function stubBot(): Stub {
 		sends,
 		edits,
 		failEdit: (n, err) => editFailures.set(n, err),
+		gateEdit: (n) => {
+			let release!: () => void;
+			editGates.set(n, new Promise<void>(r => { release = r; }));
+			return { release };
+		},
 	};
 }
 
 describe("TelegramStreamer activity coalescing", () => {
-	test("toolStart sends once; subsequent tool/preamble/notice edit the same message", async () => {
+	test("debounce: a burst of appends collapses into one edit carrying the latest snapshot", async () => {
 		const { bot, sends, edits } = stubBot();
 		const s = new TelegramStreamer(bot, 42);
 		await s.toolStart("t1", "📖 read a.ts");
 		await s.commitPreamble("thinking out loud");
 		await s.notice("🔄 retry 1/3");
 		await s.toolStart("t2", "💻 bash: ls");
+		await s.flushPending();
 		expect(sends.length).toBe(1);
 		expect(sends[0]!.text).toBe("📖 read a.ts");
-		expect(edits.length).toBe(3);
+		// All three appends happened within the debounce window → 1 edit.
+		expect(edits.length).toBe(1);
 		const finalEdit = edits[edits.length - 1]!;
 		expect(finalEdit.messageId).toBe(sends[0]!.messageId);
 		expect(finalEdit.text).toBe(
@@ -79,6 +92,7 @@ describe("TelegramStreamer activity coalescing", () => {
 		const s = new TelegramStreamer(bot, 42);
 		await s.toolStart("t1", "📖 read a.ts");
 		await s.notice("🌐 hit https://example.com");
+		await s.flushPending();
 		expect(sends[0]!.opts?.link_preview_options).toEqual({ is_disabled: true });
 		expect(edits[0]!.opts?.link_preview_options).toEqual({ is_disabled: true });
 	});
@@ -89,6 +103,7 @@ describe("TelegramStreamer activity coalescing", () => {
 		await s.toolStart("t1", "📖 read a.ts");
 		await s.toolStart("t2", "💻 bash: ls");
 		await s.toolEnd("t1", false, undefined);
+		await s.flushPending();
 		expect(sends.length).toBe(1);
 		expect(edits[edits.length - 1]!.text).toBe("✅ read a.ts\n💻 bash: ls");
 	});
@@ -98,6 +113,7 @@ describe("TelegramStreamer activity coalescing", () => {
 		const s = new TelegramStreamer(bot, 42);
 		await s.toolStart("t1", "📖 read a.ts");
 		await s.toolEnd("t1", true, "❌ read failed: ENOENT");
+		await s.flushPending();
 		expect(edits[edits.length - 1]!.text).toBe("❌ read failed: ENOENT");
 	});
 
@@ -111,11 +127,13 @@ describe("TelegramStreamer activity coalescing", () => {
 		expect(sends.length).toBe(2);
 		expect(sends[1]!.text).toBe("📖 read f25.ts");
 		// Editing an old tool's line should still target the FIRST message.
-		const editsBefore = edits.length;
 		await s.toolEnd("t0", false, undefined);
-		expect(edits.length).toBe(editsBefore + 1);
-		expect(edits[edits.length - 1]!.messageId).toBe(sends[0]!.messageId);
-		expect(edits[edits.length - 1]!.text.startsWith("✅ read f0.ts\n")).toBe(true);
+		await s.flushPending();
+		// At least one edit lands on the first (sealed) message with ✅ on f0.
+		const firstMsgEdits = edits.filter(e => e.messageId === sends[0]!.messageId);
+		expect(firstMsgEdits.length).toBeGreaterThan(0);
+		const last = firstMsgEdits[firstMsgEdits.length - 1]!;
+		expect(last.text.startsWith("✅ read f0.ts\n")).toBe(true);
 	});
 
 	test("seals when char cap would overflow, fresh message starts with the overflowing line", async () => {
@@ -132,14 +150,18 @@ describe("TelegramStreamer activity coalescing", () => {
 		expect(sends[1]!.text).toBe(big);
 	});
 
-	test("finalize clears state and is idempotent", async () => {
-		const { bot, sends } = stubBot();
+	test("finalize drains pending edits and is idempotent", async () => {
+		const { bot, sends, edits } = stubBot();
 		const s = new TelegramStreamer(bot, 42);
 		await s.toolStart("t1", "📖 read a.ts");
+		await s.toolStart("t2", "💻 bash: ls");
+		// No flushPending — finalize itself must drain.
 		await s.finalize();
 		await s.finalize();
+		expect(edits.length).toBe(1);
+		expect(edits[0]!.text).toBe("📖 read a.ts\n💻 bash: ls");
 		// After finalize, further toolStart is a no-op.
-		await s.toolStart("t2", "📖 read b.ts");
+		await s.toolStart("t3", "📖 read b.ts");
 		expect(sends.length).toBe(1);
 	});
 
@@ -154,9 +176,11 @@ describe("TelegramStreamer activity coalescing", () => {
 		const s = new TelegramStreamer(stub.bot, 42);
 		stub.failEdit(1, new Error("Bad Request: too many requests"));
 		await s.toolStart("t1", "📖 read a.ts"); // send msg (no edit yet)
-		await s.toolStart("t2", "💻 bash: ls"); // edit #1: forced failure
+		await s.toolStart("t2", "💻 bash: ls");
+		await s.flushPending(); // edit #1 fires and fails
 		expect(stub.edits.length).toBe(0);
-		await s.notice("ok"); // next flush — must include the bash line
+		await s.notice("ok"); // queue a new flush
+		await s.flushPending(); // edit #2 — must include the bash line
 		expect(stub.edits.length).toBe(1);
 		expect(stub.edits[0]!.text).toBe("📖 read a.ts\n💻 bash: ls\nok");
 	});
@@ -170,8 +194,115 @@ describe("TelegramStreamer activity coalescing", () => {
 		// The error is swallowed; cache must update so we don't re-attempt
 		// an identical-state edit on the next flush.
 		await s.notice("ok");
-		await s.notice("more"); // genuine change — one edit
+		await s.flushPending(); // edit #1: 'not modified'
+		await s.notice("more"); // genuine change
+		await s.flushPending(); // edit #2: succeeds
 		expect(stub.edits.length).toBe(1);
 		expect(stub.edits[0]!.text).toBe("📖 read a.ts\nok\nmore");
+	});
+	test("finalize awaits an in-flight edit whose timer already fired", async () => {
+		// Regression: an earlier draft nulled `pendingFlush` synchronously
+		// inside runOnce, so `drainHost` could return before the in-flight
+		// `editMessageText` settled. `ChatSession.dispose` would then treat
+		// the streamer as done while the final ✅ frame was still on the
+		// wire. Now `finalize` awaits every `inflightFlushes` entry.
+		const stub = stubBot();
+		const s = new TelegramStreamer(stub.bot, 42);
+		const gate = stub.gateEdit(1);
+		await s.toolStart("t1", "📖 read a.ts");
+		await s.toolStart("t2", "💻 bash: ls");
+		// Trigger the timer manually by waiting > debounce. Drain starts
+		// the edit, which then blocks inside the gated stub.
+		await Bun.sleep(300);
+		// Edit is in flight but not yet recorded — the gate is still closed.
+		expect(stub.edits.length).toBe(0);
+		const finalizing = s.finalize();
+		// `finalize` must NOT resolve while the edit is gated.
+		const raced = await Promise.race([
+			finalizing.then(() => "finalize"),
+			Bun.sleep(50).then(() => "timeout"),
+		]);
+		expect(raced).toBe("timeout");
+		gate.release();
+		await finalizing;
+		expect(stub.edits.length).toBe(1);
+		expect(stub.edits[0]!.text).toBe("📖 read a.ts\n💻 bash: ls");
+	});
+
+	test("replaceWith awaits an in-flight edit so the error message lands last", async () => {
+		const stub = stubBot();
+		const s = new TelegramStreamer(stub.bot, 42);
+		const gate = stub.gateEdit(1);
+		await s.toolStart("t1", "📖 read a.ts");
+		await s.toolStart("t2", "💻 bash: ls");
+		await Bun.sleep(300); // timer fires, edit blocks in stub
+		const order: string[] = [];
+		const stubSend = stub.bot.api.sendMessage as unknown as (
+			...args: unknown[]
+		) => Promise<{ message_id: number }>;
+		const wrapped = stub.bot.api.sendMessage;
+		(stub.bot.api as unknown as { sendMessage: typeof stubSend }).sendMessage =
+			async (...args) => {
+				order.push("send");
+				return wrapped.apply(stub.bot.api, args as Parameters<typeof wrapped>);
+			};
+		const replacing = s.replaceWith("error: boom");
+		// Edit hasn't landed yet — neither should the error send.
+		await Bun.sleep(20);
+		expect(stub.edits.length).toBe(0);
+		expect(order).toEqual([]);
+		gate.release();
+		await replacing;
+		expect(stub.edits.length).toBe(1); // edit landed first
+		expect(order).toEqual(["send"]);   // then error message
+	});
+
+	test("replaceWith during the debounce window doesn't hang (regression)", async () => {
+		// Copilot review caught this: scheduleFlush used to add the pending
+		// promise to inflightFlushes immediately. If replaceWith cleared
+		// the timer before runOnce fired, the promise never resolved and
+		// Promise.allSettled hung indefinitely. Fix: only track post-timer
+		// flushes in inflightFlushes.
+		const stub = stubBot();
+		const s = new TelegramStreamer(stub.bot, 42);
+		await s.toolStart("t1", "📖 read a.ts");
+		await s.toolStart("t2", "💻 bash: ls"); // timer pending, not fired
+		const replacing = s.replaceWith("error: boom");
+		// Must complete promptly — well under the debounce window.
+		const raced = await Promise.race([
+			replacing.then(() => "done"),
+			Bun.sleep(100).then(() => "hang"),
+		]);
+		expect(raced).toBe("done");
+		// Error message landed; pending edit was cancelled before firing.
+		expect(stub.sends.some(s => s.text === "error: boom")).toBe(true);
+		expect(stub.edits.length).toBe(0);
+	});
+
+	test("chained edits serialize per host so a slow first edit can't overwrite a faster second (regression)", async () => {
+		// Copilot review caught this: scheduleFlush nulls pendingFlushRun
+		// before awaiting flushActivityNow, so a post-timer append starts a
+		// fresh debounce. If the first edit was delayed (autoRetry backoff
+		// on 429), the second edit could land first and then be overwritten
+		// by the first's stale snapshot. Fix: each new flush awaits the
+		// host's lastFlush before sending its own editMessageText.
+		const stub = stubBot();
+		const s = new TelegramStreamer(stub.bot, 42);
+		const gate1 = stub.gateEdit(1); // first edit blocks
+		await s.toolStart("t1", "📖 read a.ts");
+		await s.toolStart("t2", "💻 bash: ls");
+		await Bun.sleep(300); // timer fires; runOnce A starts, blocks on gate
+		// While A is blocked, mutate state and trigger a second debounce.
+		await s.notice("late line");
+		await Bun.sleep(300); // timer for B fires
+		// B must NOT have edited yet — it's chained behind A.
+		expect(stub.edits.length).toBe(0);
+		gate1.release(); // A completes first
+		await s.flushPending();
+		// Two edits, in order: A's snapshot, then B's snapshot. B's is the
+		// authoritative final state with all three lines.
+		expect(stub.edits.length).toBe(2);
+		expect(stub.edits[0]!.text).toBe("📖 read a.ts\n💻 bash: ls");
+		expect(stub.edits[1]!.text).toBe("📖 read a.ts\n💻 bash: ls\nlate line");
 	});
 });

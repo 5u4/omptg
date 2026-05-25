@@ -13,6 +13,7 @@
  * Run: `bun run start` (loads .env via Bun).
  */
 import { Bot, GrammyError, HttpError } from "grammy";
+import { autoRetry } from "@grammyjs/auto-retry";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
@@ -80,6 +81,18 @@ const ALLOWED = new Set(
 // --- wiring -----------------------------------------------------------------
 
 const bot = new Bot(TOKEN);
+// Auto-handle telegram 429 (rate limit) and 5xx by waiting `retry_after`
+// and retrying the same request. Without this, edits/sends in the
+// rolling activity message would throw and be silently logged-and-lost
+// — the ✅/❌ result line would stay pinned at 📖, or a chunk of the
+// assistant reply would vanish. Cap is defensive: a single request
+// shouldn't tie up the chain for more than ~30s, and we'd rather log a
+// drop than wedge a turn behind a multi-minute backoff.
+bot.api.config.use(autoRetry({
+	maxRetryAttempts: 5,
+	maxDelaySeconds: 30,
+	rethrowInternalServerErrors: false,
+}));
 const chatStore = new ChatStore();
 const registry = new ChatRegistry(bot, DEFAULT_CWD, chatStore);
 const pendingVoice = new PendingVoiceStore();
