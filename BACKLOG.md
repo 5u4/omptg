@@ -7,7 +7,9 @@ to land in one session. Phases are loose — grab whatever feels useful.
 
 - All paths relative to `omp-tg-sdk/` unless noted.
 - Smokes live in `src/smoke-<topic>.ts`, runnable with `bun run src/smoke-<topic>.ts`.
-- Restart the bot after code changes: `bun run pm2:restart`.
+- After code changes: commit first, then `bun run pm2:restart`. PM2 reads the
+  on-disk source at restart time, so restarting before committing means the
+  running bot and the commit can drift if you forget to restart again later.
 - Logs: structured `logs/<date>.log`, raw `logs/pm2-out.log` (`bun run pm2:logs`).
 - Typecheck before commit: `bun run typecheck`.
 - Commit style: short imperative subject + body. No co-author lines.
