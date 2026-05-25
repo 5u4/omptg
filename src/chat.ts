@@ -17,7 +17,7 @@ import type {
 	AgentSessionEvent,
 	SessionInfo,
 } from "@oh-my-pi/pi-coding-agent";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import type { Bot } from "grammy";
 import { TelegramStreamer } from "./streamer.ts";
 import { TypingIndicator } from "./typing.ts";
@@ -525,6 +525,43 @@ export class ChatSession {
 			this.log.warn("title.regen_failed", { err: String(err) });
 			return undefined;
 		}
+	}
+
+	/** Available models (with valid API keys) for the active session.
+	 *  Lazily ensures a session so /model works on a cold chat too. */
+	async getAvailableModels(): Promise<readonly Model[]> {
+		const s = await this.ensure();
+		return s.getAvailableModels();
+	}
+
+	/** Temporarily switch the default-role model for the active session.
+	 *  Does NOT persist to global settings (Telegram-side choice shouldn't
+	 *  leak into CLI default). Returns the model on success, undefined if
+	 *  `id` isn't in the available list. */
+	async setModelById(id: string): Promise<Model | undefined> {
+		const s = await this.ensure();
+		const model = s.getAvailableModels().find(m => m.id === id);
+		if (!model) return undefined;
+		await s.setModelTemporary(model);
+		this.log.info("model.set", { id });
+		return model;
+	}
+
+	/** Open an inline-keyboard picker listing available model ids and
+	 *  apply the choice via setModelTemporary. Returns the chosen model,
+	 *  or undefined on cancel / no models. */
+	async promptModelSelection(): Promise<Model | undefined> {
+		const s = await this.ensure();
+		const models = s.getAvailableModels();
+		if (models.length === 0) return undefined;
+		const ids = models.map(m => m.id);
+		const picked = await this.ui.select("pick model", ids);
+		if (!picked) return undefined;
+		const model = models.find(m => m.id === picked);
+		if (!model) return undefined;
+		await s.setModelTemporary(model);
+		this.log.info("model.set", { id: model.id });
+		return model;
 	}
 }
 

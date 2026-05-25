@@ -150,6 +150,7 @@ bot.command("start", ctx =>
 			"/sessions [n]  list recent stored sessions (default 8, max 50)",
 			"/resume [n]  reopen session by 1-based index (default: most recent)",
 			"/status  show session id, model, cwd",
+			"/model [id]  switch model — no arg = pick from list (temporary, not persisted)",
 			"",
 			"chat → cwd binding",
 			"/whoami   show this chat's id, type, and binding",
@@ -181,6 +182,29 @@ bot.command("status", async ctx => {
 		lines.push(`context: ${pctStr} (${tokStr} / ${win.toLocaleString("en-US")})`);
 	}
 	await ctx.reply(lines.join("\n"));
+});
+
+bot.command("model", async ctx => {
+	const chat = registry.get(ctx.chat.id);
+	const arg = ctx.match?.trim();
+	if (arg) {
+		const model = await chat.setModelById(arg);
+		if (!model) {
+			const available = (await chat.getAvailableModels()).map(m => m.id);
+			await ctx.reply(
+				`unknown model "${arg}"\navailable:\n  ${available.join("\n  ")}`,
+			);
+			return;
+		}
+		await ctx.reply(`model: ${model.id}`);
+		return;
+	}
+	const picked = await chat.promptModelSelection();
+	if (!picked) {
+		await ctx.reply("model unchanged");
+		return;
+	}
+	await ctx.reply(`model: ${picked.id}`);
 });
 
 bot.command("cancel", async ctx => {
@@ -732,6 +756,7 @@ const SLASH_COMMANDS = [
 	{ command: "resume",   description: "Reopen session — no arg = most recent" },
 	{ command: "cancel",   description: "Abort the current turn (keeps session)" },
 	{ command: "status",   description: "Show session id, model, cwd" },
+	{ command: "model",    description: "Switch model — no arg opens picker" },
 	{ command: "whoami",   description: "Show this chat's id + binding" },
 	{ command: "bind",     description: "/bind <path> — pin this chat to a cwd" },
 	{ command: "unbind",   description: "Remove this chat's binding" },
