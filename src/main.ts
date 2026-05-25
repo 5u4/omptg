@@ -13,6 +13,7 @@ import { resolve as resolvePath } from "node:path";
 import { ChatRegistry, listStoredSessions } from "./chat.ts";
 import { ChatStore, expandHome } from "./chat-store.ts";
 import { parseCallback } from "./ui-bridge.ts";
+import { formatReplyPrompt, type ReplyContext } from "./quote.ts";
 import { initTheme } from "@oh-my-pi/pi-coding-agent";
 import { scoped, logPath } from "./logger.ts";
 
@@ -382,7 +383,26 @@ function knownCommands(): Set<string> {
 	return _knownCommands;
 }
 bot.on("message:text", async ctx => {
-	const text = ctx.message.text;
+	const rawText = ctx.message.text;
+	// Detect telegram's native reply (long-press → reply). The replied-to
+	// message is in `reply_to_message`; we wrap it as a markdown blockquote
+	// so the agent can read what the user is referring back to. We do this
+	// for non-command, non-pendingUi-text replies — the awaitsText path
+	// already handles the "answering my own /ask" case below.
+	const replyMsg = ctx.message.reply_to_message;
+	let reply: ReplyContext | undefined;
+	if (replyMsg) {
+		const author = replyMsg.from;
+		const fromBot = author?.id === ctx.me.id;
+		reply = {
+			author: fromBot
+				? "you"
+				: author?.first_name || author?.username || "someone",
+			fromBot,
+			text: replyMsg.text ?? replyMsg.caption ?? "",
+		};
+	}
+	const text = rawText;
 	if (text.startsWith("/")) {
 		// First bot_command entity at offset 0 is the command. Strip an
 		// optional `@bot` suffix that telegram clients add in groups.
@@ -429,7 +449,8 @@ bot.on("message:text", async ctx => {
 	// the chat asynchronously so we don't lose them.
 	void (async () => {
 		try {
-			await chat.prompt(text);
+			const promptText = reply ? formatReplyPrompt(reply, text) : text;
+			await chat.prompt(promptText);
 			const s = await chat.ensure();
 			await s.waitForIdle();
 		} catch (err) {
