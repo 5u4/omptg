@@ -5,19 +5,26 @@
  * - Assistant text is committed once at `message_end` (chat.ts) and posted
  *   as one or more sendMessage calls. We don't stream token-by-token —
  *   the resulting mid-turn reasoning prose was noisy in telegram.
- * - Each tool invocation gets its OWN persistent message: send the
- *   `📖 read foo.ts` line at `tool_execution_start`, then edit that same
- *   message id to `✅ read foo.ts` (or `❌ … : <detail>`) on
- *   `tool_execution_end`. Concurrent tools are matched by `toolCallId`.
- * - Transient notices (auto_retry, etc.) are posted as their own
- *   sendMessage so they also live in the history.
+ * - All "muted" status (tool start/end, mid-turn preambles, retry
+ *   notices) is coalesced into a single rolling **activity message**:
+ *   the first event sends one telegram message, subsequent events append
+ *   a line and `editMessageText` the same message id. `tool_execution_end`
+ *   rewrites the original `📖 …` line in place to `✅ …` / `❌ … : <detail>`
+ *   via a saved `{host, lineIndex}` reference. Concurrent tools are
+ *   matched by `toolCallId`.
+ * - When an activity message hits either cap (ACTIVITY_CHAR_CAP /
+ *   ACTIVITY_LINE_CAP), it is sealed (we drop our `this.activity`
+ *   reference) and the next event opens a fresh send. Already-recorded
+ *   `toolMsgs` entries keep editing the OLD sealed message — telegram
+ *   allows edits for ~48h, so cross-seal `toolEnd` rewrites still work.
  * - finalize() never deletes messages and never posts a placeholder. If a
- *   turn produced no assistant text, the tool messages alone tell the
- *   story; a bare "(no response)" line was just noise in chat.
+ *   turn produced no assistant text, the activity message(s) alone tell
+ *   the story; a bare "(no response)" line was just noise in chat.
  *
  * Telegram caps a single message at 4096 chars; long assistant replies
  * are split at the last newline within budget (or a hard split if no
- * newline fits in the second half of the budget).
+ * newline fits in the second half of the budget). The activity caps sit
+ * well below 4096 so a late append never overflows mid-edit.
  */
 import type { Bot } from "grammy";
 import { splitMarkdownForTelegram } from "./markdown.ts";
