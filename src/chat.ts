@@ -67,6 +67,10 @@ export class ChatSession {
 	/** Set once we've attempted (or completed) title generation for the
 	 *  current session; cleared whenever session is recreated. */
 	private titleAttempted = false;
+	/** Latched on first ensure() call (per chat lifetime, not per session).
+	 *  Prevents re-running auto-resume after the user explicitly /new'd
+	 *  away from the recovered session — we only try once on cold boot. */
+	private autoResumeTried = false;
 
 	constructor(opts: ChatSessionOptions) {
 		this.chatId = opts.chatId;
@@ -97,10 +101,51 @@ export class ChatSession {
 		return this.session?.isStreaming ?? false;
 	}
 
-	/** Return existing session or create a fresh one in this chat's cwd. */
+	/**
+	 * Return existing session, or — on the very first ensure() of a chat's
+	 * lifetime — try to resume the most recent stored session in this cwd
+	 * so a bot restart picks up where the user left off. Falls through to
+	 * createFresh() if there's nothing to resume, or if open fails.
+	 *
+	 * Skipped after /new, /resume, or any other path that explicitly placed
+	 * a session via attach() (autoResumeTried gets latched on first call,
+	 * and an existing this.session short-circuits before we even look).
+	 */
 	async ensure(): Promise<AgentSession> {
 		if (this.session) return this.session;
+		if (!this.autoResumeTried) {
+			this.autoResumeTried = true;
+			const recovered = await this.tryAutoResume();
+			if (recovered) return recovered;
+		}
 		return this.createFresh();
+	}
+
+	private async tryAutoResume(): Promise<AgentSession | undefined> {
+		try {
+			const sessions = await SessionManager.list(this.cwd);
+			if (sessions.length === 0) return undefined;
+			const newest = sessions.reduce((a, b) =>
+				a.modified.getTime() >= b.modified.getTime() ? a : b,
+			);
+			const manager = await SessionManager.open(newest.path);
+			const created = await createAgentSession({
+				cwd: manager.getCwd(),
+				sessionManager: manager,
+				hasUI: true,
+			});
+			this.cwd = manager.getCwd();
+			this.attach(created.session, created.setToolUIContext);
+			this.log.info("session.auto_resumed", {
+				session_id: created.session.sessionId,
+				path: newest.path,
+				name: created.session.sessionName,
+			});
+			return created.session;
+		} catch (err) {
+			this.log.warn("session.auto_resume_failed", { err: String(err) });
+			return undefined;
+		}
 	}
 
 	/** Replace the current session with a brand-new one in the same cwd. */
