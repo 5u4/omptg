@@ -47,6 +47,11 @@ export function encodeCallback(requestId: string, value: string): string {
 	return `${CALLBACK_PREFIX}${requestId}:${value}`;
 }
 
+/** Trim button text to budget, preserving leading whitespace, suffixing …. */
+function truncateButton(s: string, budget: number): string {
+	return s.length <= budget ? s : `${s.slice(0, budget - 1).trimEnd()}…`;
+}
+
 export function parseCallback(
 	data: string,
 ): { requestId: string; value: string } | undefined {
@@ -125,8 +130,28 @@ export class TelegramUI implements ExtensionUIContext {
 		this.rejectInFlight();
 		const requestId = freshId();
 		this.log.info("select.fire", { req_id: requestId, title, n_options: options.length });
+
+		// Telegram inline-button text is capped (~64 chars before truncation
+		// shows ellipsis and hides the tail). If any option would overflow,
+		// post a numbered preview as a regular message so the user can read
+		// the full option text, and switch buttons to short "1)" / "2)" /…
+		// labels. Short options keep the original verbatim-button UX.
+		const BUTTON_BUDGET = 60;
+		const longOptions = options.some(o => o.length > BUTTON_BUDGET);
+		if (longOptions) {
+			const preview = [
+				`❓ ${title}`,
+				"",
+				...options.map((o, i) => `${i + 1}) ${o}`),
+			].join("\n");
+			await this.bot.api.sendMessage(this.chatId, preview);
+		}
+
 		const keyboard: InlineKeyboardButton[][] = options.map((opt, i) => [
-			{ text: opt, callback_data: encodeCallback(requestId, `i${i}`) },
+			{
+				text: longOptions ? `${i + 1}) ${truncateButton(opt, BUTTON_BUDGET)}` : opt,
+				callback_data: encodeCallback(requestId, `i${i}`),
+			},
 		]);
 		keyboard.push([
 			{
@@ -141,7 +166,10 @@ export class TelegramUI implements ExtensionUIContext {
 			cb: sampleCb,
 			cb_len: sampleCb?.length,
 		});
-		const msg = await this.bot.api.sendMessage(this.chatId, `❓ ${title}`, {
+		// When we already posted the preview, the keyboard message just needs
+		// to be the carrier — keep it minimal so the visible chat is clean.
+		const keyboardText = longOptions ? "👇 pick one" : `❓ ${title}`;
+		const msg = await this.bot.api.sendMessage(this.chatId, keyboardText, {
 			reply_markup: { inline_keyboard: keyboard },
 		});
 		this.log.info("select.posted", { req_id: requestId, message_id: msg.message_id });
