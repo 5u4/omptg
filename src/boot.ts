@@ -82,12 +82,12 @@ export async function wipeChatCommandOverrides(deps: Deps): Promise<void> {
  * Telegram caches the LAST `allowed_updates` value per bot token. If a
  * previous run (or any other client using this token) called getUpdates
  * without callback_query, telegram will keep filtering them out until
- * we explicitly re-set the list. We also drop pending updates so an
- * old queued message can't shadow a fresh callback_query.
+ * we explicitly re-set the list (which bot.start() does below).
  *
- * If a stale webhook is set, delete it but PRESERVE pending updates —
- * a callback_query the user tapped while the webhook was active should
- * still be delivered to us via polling once it's gone.
+ * If a stale webhook is set, delete it but PRESERVE pending updates
+ * (`drop_pending_updates: false`) — a callback_query the user tapped
+ * while the webhook was active should still be delivered to us via
+ * polling once it's gone.
  */
 export async function probeWebhook(deps: Deps): Promise<void> {
 	try {

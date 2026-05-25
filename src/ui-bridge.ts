@@ -296,7 +296,7 @@ export class TelegramUI implements ExtensionUIContext {
 	notify(message: string, type: "info" | "warning" | "error" = "info"): void {
 		const emoji = type === "error" ? "❌" : type === "warning" ? "⚠️" : "ℹ️";
 		void this.bot.api
-			.sendMessage(this.chatId, `${emoji} ${message}`)
+			.sendMessage(this.chatId, `${emoji} ${message}`, this.topicOpts())
 			.catch(err => console.warn("[notify] failed:", err));
 	}
 

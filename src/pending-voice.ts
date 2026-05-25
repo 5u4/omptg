@@ -10,6 +10,8 @@
  * Entries expire after TTL_MS so an abandoned approval doesn't leak.
  * Tests stub `Date.now()` via the `now` arg.
  */
+import { randomBytes } from "node:crypto";
+
 export interface PendingVoice {
 	id: string;
 	chatId: number;
@@ -132,11 +134,12 @@ export class PendingVoiceStore {
 	}
 }
 
-/** Short id that fits in a callback_data budget: 12 hex chars = 6 bytes. */
+/**
+ * Short id that fits in a callback_data budget: 12 hex chars = 6 bytes.
+ * Crypto-grade randomness so two parallel transcriptions can't collide
+ * onto the same id (Math.random would be Good Enough at this size, but
+ * randomBytes costs the same and removes the question entirely).
+ */
 export function freshVoiceId(): string {
-	let out = "";
-	for (let i = 0; i < 12; i++) {
-		out += Math.floor(Math.random() * 16).toString(16);
-	}
-	return out;
+	return randomBytes(6).toString("hex");
 }

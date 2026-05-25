@@ -52,7 +52,7 @@ Every agent turn in this chat now runs in that cwd. In a [forum topic](https://c
 ## Commands
 
 - `/new` — start a fresh session in the current chat
-- `/sessions [n]` — list recent sessions (default 10)
+- `/sessions [n]` — list recent sessions (default 8)
 - `/resume <n>` — resume session #n from `/sessions`
 - `/cancel` — cancel the in-flight agent turn
 - `/status` — active session id, cwd, model

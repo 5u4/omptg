@@ -173,6 +173,13 @@ export function splitMarkdownForTelegram(
 	};
 
 	for (const line of lines) {
+		// Snapshot fence state BEFORE we apply this line's effect, so a
+		// rollback (push exceeded budget) can restore it. Without this,
+		// dropping a fence-opener line would leave `openInfo` toggled to
+		// "open" with no actual opener in `buf`, causing flush() to emit
+		// a stray closing ``` and the next chunk to reopen with an empty
+		// info string.
+		const prevOpenInfo: string | null = openInfo;
 		const fence = line.match(FENCE_RE);
 		if (fence) {
 			openInfo = openInfo === null ? fence[1] ?? "" : null;
@@ -185,10 +192,20 @@ export function splitMarkdownForTelegram(
 			// Roll back the line, flush what we had, then start a new chunk
 			// with this line — and reopen the fence if we were inside one.
 			const dropped = buf.pop()!;
-			const wasOpen = openInfo !== null;
-			flush(wasOpen);
-			if (wasOpen) buf.push("```" + openInfo);
+			// Revert fence toggle: we're flushing `buf` as it was BEFORE
+			// `line`, so the chunk's fence state is `prevOpenInfo`. The
+			// dropped line goes into the next chunk, where its fence
+			// effect will re-apply on the next iteration via the same
+			// snapshot mechanism.
+			const chunkOpen = prevOpenInfo;
+			openInfo = prevOpenInfo;
+			flush(chunkOpen !== null);
+			if (chunkOpen !== null) buf.push("```" + chunkOpen);
 			buf.push(dropped);
+			// Re-apply the dropped line's fence effect for the NEW chunk.
+			if (fence) {
+				openInfo = openInfo === null ? fence[1] ?? "" : null;
+			}
 		} else if (tentative.length > budget) {
 			// Single line already exceeds budget — fall back to hard split
 			// on the converted form. Rare for sane assistant text.
