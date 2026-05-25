@@ -1,5 +1,5 @@
 /**
- * omp-tg-sdk entrypoint.
+ * omp-tg entrypoint.
  *
  * Wires telegram (grammY) to per-chat ChatSession instances. See chat.ts
  * for the per-chat runtime and ui-bridge.ts for the inline-keyboard /
