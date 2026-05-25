@@ -66,11 +66,6 @@ distinct telegram chats with the same backend but different scopes.
 class, instantiate N of them based on `BOTS_CONFIG_PATH` env var
 pointing at a yaml/json list. Each one polls independently.
 
-### P3.3 — Web dashboard (low priority)
-
-`aily`-style dashboard. Probably not worth it — telegram is already the
-UI. Skip unless you find yourself wanting it.
-
 ---
 
 ## Priority 4 — hygiene
