@@ -2,7 +2,7 @@
  * Smoke for formatReplyPrompt.
  *   bun run src/smoke-quote.ts
  */
-import { formatReplyPrompt } from "./quote.ts";
+import { formatReplyPrompt, formatForwardPrompt } from "./quote.ts";
 
 function assert(cond: unknown, msg: string): asserts cond {
 	if (!cond) throw new Error(`assert: ${msg}`);
@@ -65,6 +65,38 @@ function assert(cond: unknown, msg: string): asserts cond {
 	);
 	assert(out === "> [replying to bot you]\n\nhello", `unexpected: ${out}`);
 	console.log("✓ empty quote → header only");
+}
+
+// 6. Forward from known user.
+{
+	const out = formatForwardPrompt(
+		{ kind: "user", name: "alice", date: 0, text: "look at this bug" },
+		"",
+	);
+	assert(out === "> [forwarded from user alice]\n> look at this bug",
+		`unexpected: ${out}`);
+	console.log("✓ forward from user, no extra text");
+}
+
+// 7. Forward from channel with user caption appended.
+{
+	const out = formatForwardPrompt(
+		{ kind: "channel", name: "TheChannel", date: 0, text: "breaking news" },
+		"thoughts?",
+	);
+	assert(out === "> [forwarded from channel TheChannel]\n> breaking news\n\nthoughts?",
+		`unexpected: ${out}`);
+	console.log("✓ forward from channel + user caption");
+}
+
+// 8. Forward from hidden_user with empty body.
+{
+	const out = formatForwardPrompt(
+		{ kind: "hidden_user", name: "anon", date: 0, text: "" },
+		"",
+	);
+	assert(out === "> [forwarded from hidden_user anon]", `unexpected: ${out}`);
+	console.log("✓ forward hidden_user empty body → header only");
 }
 
 console.log("all quote smokes OK");

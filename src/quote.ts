@@ -47,3 +47,40 @@ export function formatReplyPrompt(
 	const prefix = quoted ? `> ${head}\n${quoted}` : `> ${head}`;
 	return `${prefix}\n\n${userText}`;
 }
+
+export interface ForwardContext {
+	/** Telegram MessageOrigin discriminator. */
+	kind: "user" | "hidden_user" | "chat" | "channel";
+	/** Display name of the original author / chat. */
+	name: string;
+	/** Original send date (unix seconds). Used as-is for the header tag. */
+	date: number;
+	/** The forwarded text (or caption); empty for media-only forwards. */
+	text: string;
+}
+
+/**
+ * Build a quoted-context prompt for a forwarded message:
+ *   > [forwarded from <kind> <name>]
+ *   > <text>
+ *
+ *   <userText>    ← only present for media forwards where the user adds a caption.
+ *
+ * For plain text forwards telegram doesn't let the user add inline text,
+ * so `userText` is usually empty and the prompt is just the quote block.
+ */
+export function formatForwardPrompt(
+	fwd: ForwardContext,
+	userText: string,
+	maxQuoteChars = 800,
+): string {
+	const head = `[forwarded from ${fwd.kind} ${fwd.name}]`;
+	const body = fwd.text.length > maxQuoteChars
+		? `${fwd.text.slice(0, maxQuoteChars).trimEnd()}…`
+		: fwd.text;
+	const quoted = body
+		? body.split("\n").map(line => `> ${line}`).join("\n")
+		: "";
+	const prefix = quoted ? `> ${head}\n${quoted}` : `> ${head}`;
+	return userText ? `${prefix}\n\n${userText}` : prefix;
+}

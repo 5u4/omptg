@@ -13,7 +13,7 @@ import { resolve as resolvePath } from "node:path";
 import { ChatRegistry, listStoredSessions } from "./chat.ts";
 import { ChatStore, expandHome } from "./chat-store.ts";
 import { parseCallback } from "./ui-bridge.ts";
-import { formatReplyPrompt, type ReplyContext } from "./quote.ts";
+import { formatReplyPrompt, formatForwardPrompt, type ReplyContext, type ForwardContext } from "./quote.ts";
 import { initTheme } from "@oh-my-pi/pi-coding-agent";
 import { scoped, logPath } from "./logger.ts";
 
@@ -402,6 +402,39 @@ bot.on("message:text", async ctx => {
 			text: replyMsg.text ?? replyMsg.caption ?? "",
 		};
 	}
+	// Detect telegram forward (any message with forward_origin). We wrap
+	// the forwarded body the same way as a reply, tagging the original
+	// source kind (user / hidden_user / chat / channel) and name. For
+	// plain text forwards, the user can't add inline text in the same
+	// message, so the prompt becomes just the quote block.
+	const fwdOrigin = ctx.message.forward_origin;
+	let forward: ForwardContext | undefined;
+	if (fwdOrigin) {
+		let kind: ForwardContext["kind"];
+		let name: string;
+		switch (fwdOrigin.type) {
+			case "user":
+				kind = "user";
+				name = fwdOrigin.sender_user.first_name
+					|| fwdOrigin.sender_user.username
+					|| "user";
+				break;
+			case "hidden_user":
+				kind = "hidden_user";
+				name = fwdOrigin.sender_user_name || "hidden user";
+				break;
+			case "chat":
+				kind = "chat";
+				name = ("title" in fwdOrigin.sender_chat && fwdOrigin.sender_chat.title)
+					|| "chat";
+				break;
+			case "channel":
+				kind = "channel";
+				name = fwdOrigin.chat.title || fwdOrigin.chat.username || "channel";
+				break;
+		}
+		forward = { kind, name, date: fwdOrigin.date, text: rawText };
+	}
 	const text = rawText;
 	if (text.startsWith("/")) {
 		// First bot_command entity at offset 0 is the command. Strip an
@@ -449,7 +482,13 @@ bot.on("message:text", async ctx => {
 	// the chat asynchronously so we don't lose them.
 	void (async () => {
 		try {
-			const promptText = reply ? formatReplyPrompt(reply, text) : text;
+			// Wrap order: forward first (the message itself is the quoted
+			// thing), then reply (annotates relationship to a prior message).
+			// If both are set on the same telegram message the user replied
+			// while forwarding, which is rare — handle by stacking.
+			let promptText = text;
+			if (forward) promptText = formatForwardPrompt(forward, "");
+			if (reply) promptText = formatReplyPrompt(reply, promptText);
 			await chat.prompt(promptText);
 			const s = await chat.ensure();
 			await s.waitForIdle();
