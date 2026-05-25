@@ -56,12 +56,17 @@ export function encodeCallback(requestId: string, value: string): string {
  * budget both reflect what the user actually sees.
  */
 function codePointWidth(cp: number): 1 | 2 {
-	return (cp >= 0x3400 && cp <= 0x9fff) || // CJK Unified Ideographs + Ext A
-		(cp >= 0x3040 && cp <= 0x30ff) || // Hiragana, Katakana
+	return (cp >= 0x1100 && cp <= 0x11ff) || // Hangul Jamo
+		(cp >= 0x2e80 && cp <= 0x2eff) || // CJK Radicals Supplement
+		(cp >= 0x2f00 && cp <= 0x2fdf) || // Kangxi Radicals
 		(cp >= 0x3000 && cp <= 0x303f) || // CJK symbols & punctuation
+		(cp >= 0x3040 && cp <= 0x30ff) || // Hiragana, Katakana
+		(cp >= 0x3400 && cp <= 0x9fff) || // CJK Unified Ideographs + Ext A
+		(cp >= 0xa000 && cp <= 0xa4cf) || // Yi
+		(cp >= 0xac00 && cp <= 0xd7a3) || // Hangul syllables
+		(cp >= 0xf900 && cp <= 0xfaff) || // CJK Compatibility Ideographs
 		(cp >= 0xff00 && cp <= 0xff60) || // Fullwidth forms
 		(cp >= 0xffe0 && cp <= 0xffe6) ||
-		(cp >= 0xac00 && cp <= 0xd7a3) || // Hangul syllables
 		(cp >= 0x20000 && cp <= 0x2fffd) || // CJK Ext B–F
 		(cp >= 0x30000 && cp <= 0x3fffd) ||
 		(cp >= 0x1f300 && cp <= 0x1faff) || // Emoji & pictographs
@@ -74,24 +79,6 @@ function visualWidth(s: string): number {
 	let w = 0;
 	for (const ch of s) w += codePointWidth(ch.codePointAt(0)!);
 	return w;
-}
-
-/**
- * Trim button text to a visual-column budget (CJK / emoji count as 2),
- * appending "…" when truncated. Reserves 1 column for the ellipsis.
- */
-function truncateButton(s: string, budget: number): string {
-	if (visualWidth(s) <= budget) return s;
-	const limit = Math.max(1, budget - 1);
-	let w = 0;
-	let out = "";
-	for (const ch of s) {
-		const cw = codePointWidth(ch.codePointAt(0)!);
-		if (w + cw > limit) break;
-		w += cw;
-		out += ch;
-	}
-	return `${out.trimEnd()}…`;
 }
 
 export function parseCallback(
@@ -200,7 +187,10 @@ export class TelegramUI implements ExtensionUIContext {
 
 		const keyboard: InlineKeyboardButton[][] = options.map((opt, i) => [
 			{
-				text: longOptions ? `${i + 1}) ${truncateButton(opt, BUTTON_BUDGET)}` : opt,
+				// In longOptions mode the full text is in the preview message above;
+				// the keyboard just needs an unambiguous tap target. A numeric-only
+				// label sidesteps "prefix + ellipsis pushes past the budget" entirely.
+				text: longOptions ? `${i + 1})` : opt,
 				callback_data: encodeCallback(requestId, `i${i}`),
 			},
 		]);
