@@ -2,27 +2,36 @@
  * Voice-input pipeline.
  *
  *   telegram voice/audio message  →  download .ogg/.m4a/etc into the
- *   voice cache  →  ffmpeg → 16 kHz mono WAV  →  openai-whisper
- *   (vendored via @oh-my-pi/pi-coding-agent/stt)  →  plain text.
+ *   voice cache  →  ffmpeg → 16 kHz mono WAV  →  openai-whisper running
+ *   inside an isolated `uv` venv at ~/.omp-tg/whisper-venv/  →  text.
  *
- * The user sees the transcription with [send / edit / cancel] buttons
- * before the text ever reaches the agent — misrecognition only costs a
- * tap, not an agent turn. The send path then takes the same prompt route
- * as a typed message.
+ * The user sees the transcription with [send / cancel] buttons before
+ * the text ever reaches the agent — misrecognition only costs a tap.
  *
- * ffmpeg is required (telegram voice notes are OGG Opus and whisper
- * needs PCM WAV). Python + openai-whisper are required for transcription
- * itself; we surface the SDK's "pip install openai-whisper" hint as-is.
+ * Everything whisper-related lives under ~/.omp-tg/ so cleanup is "rm
+ * -rf ~/.omp-tg" with no spillover into the system Python or the
+ * user's other whisper consumers:
+ *   - venv:           ~/.omp-tg/whisper-venv/
+ *   - model weights:  ~/.omp-tg/whisper-models/whisper/      (via XDG_CACHE_HOME)
+ *   - input cache:    ~/.omp-tg/voice-cache/
+ *
+ * Requires `uv` (https://github.com/astral-sh/uv) and `ffmpeg` on PATH.
+ * The venv + openai-whisper install is bootstrapped on first use; we
+ * cache the "ready" state per-process so subsequent transcriptions skip
+ * the import-check round trip.
  */
 import { Buffer } from "node:buffer";
-import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, platform } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Bot } from "grammy";
-import { transcribe } from "@oh-my-pi/pi-coding-agent/stt/transcriber";
 
-const CACHE_DIR = resolvePath(homedir(), ".omp-tg", "voice-cache");
+const OMP_HOME = resolvePath(homedir(), ".omp-tg");
+const CACHE_DIR = resolvePath(OMP_HOME, "voice-cache");
+const VENV_DIR = resolvePath(OMP_HOME, "whisper-venv");
+const MODEL_CACHE_DIR = resolvePath(OMP_HOME, "whisper-models");
+
 /** Soft cache cap. Voice notes are tiny; 200 MB is months of input. */
 const MAX_CACHE_BYTES = 200 * 1024 * 1024;
 /** Per-file hard cap. Telegram voice notes top out around 1 hr / ~30 MB,
@@ -33,10 +42,14 @@ const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
 
 mkdirSync(CACHE_DIR, { recursive: true });
 
-/** Extensions we trust as audio-bearing. Anything else gets `.bin` and
- *  ffmpeg sniffs the container — kept for forward-compat with new
- *  telegram audio types. */
+/** Extensions we trust as audio-bearing. Anything else gets `.ogg` (the
+ *  default for telegram voice notes) — ffmpeg will sniff the container
+ *  either way, the extension is just a hint. */
 const AUDIO_EXTS = new Set([".ogg", ".oga", ".opus", ".mp3", ".m4a", ".aac", ".wav", ".flac", ".webm"]);
+
+const VENV_PYTHON = platform() === "win32"
+	? resolvePath(VENV_DIR, "Scripts", "python.exe")
+	: resolvePath(VENV_DIR, "bin", "python");
 
 export interface DownloadedAudio {
 	path: string;
@@ -46,8 +59,7 @@ export interface DownloadedAudio {
 /**
  * Download a telegram voice/audio file to the cache, returning the
  * absolute path. Caller is responsible for converting + cleaning up; we
- * keep the original around so the transcription is reproducible and the
- * user could conceivably re-listen via the cache.
+ * keep the original around so the transcription is reproducible.
  */
 export async function downloadVoiceToCache(bot: Bot, fileId: string): Promise<DownloadedAudio> {
 	const file = await bot.api.getFile(fileId);
@@ -85,11 +97,12 @@ export async function downloadVoiceToCache(bot: Bot, fileId: string): Promise<Do
 
 /**
  * ffmpeg `<input>` → 16 kHz mono PCM WAV next to the input. Returns the
- * wav path. Throws with the last line of ffmpeg's stderr if conversion
- * fails (usually "command not found" — surfaced explicitly).
+ * wav path. Throws with a recognizable message when ffmpeg is missing
+ * or conversion fails.
  */
 export async function convertToWav(inputPath: string): Promise<string> {
-	const wavPath = `${inputPath.replace(/\.[^.]+$/, "")}.wav`;
+	const base = inputPath.replace(/\.[^.]+$/, "");
+	const wavPath = inputPath.toLowerCase().endsWith(".wav") ? `${base}.16k.wav` : `${base}.wav`;
 	let proc: ReturnType<typeof Bun.spawn>;
 	try {
 		proc = Bun.spawn(
@@ -110,10 +123,109 @@ export async function convertToWav(inputPath: string): Promise<string> {
 	return wavPath;
 }
 
+// ---------- isolated whisper venv -----------------------------------------
+
+/** Reads WAV with stdlib `wave`, resamples to 16k mono, runs whisper.
+ *  Accepts `language="auto"` as "let whisper detect". */
+const TRANSCRIBE_SCRIPT = `
+import sys, wave, re
+import numpy as np
+import whisper
+
+def load_wav(path):
+    with wave.open(path, "rb") as wf:
+        rate, channels, width = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
+        raw = wf.readframes(wf.getnframes())
+    if width == 2:
+        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif width == 1:
+        audio = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif width == 4:
+        audio = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    else:
+        raise ValueError(f"Unsupported sample width: {width}")
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    if rate != 16000:
+        n = int(len(audio) * 16000 / rate)
+        audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio).astype(np.float32)
+    return audio
+
+path = sys.argv[1]
+model_name = sys.argv[2] if len(sys.argv) > 2 else "base"
+language = sys.argv[3] if len(sys.argv) > 3 else "en"
+lang_arg = None if language.lower() in ("auto", "") else language
+if lang_arg is not None and not re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z]{2})?", lang_arg):
+    print(f"Invalid language code: {language}", file=sys.stderr)
+    sys.exit(1)
+
+audio = load_wav(path)
+model = whisper.load_model(model_name)
+result = model.transcribe(audio, language=lang_arg)
+print(result["text"].strip())
+`;
+
+/** Memoized per-process: skip the import probe on subsequent calls. */
+let envReady: Promise<void> | undefined;
+
+/**
+ * Bootstrap (or reuse) ~/.omp-tg/whisper-venv with openai-whisper installed.
+ * Idempotent: a second concurrent caller awaits the same promise.
+ */
+export function ensureWhisperEnv(): Promise<void> {
+	if (envReady) return envReady;
+	envReady = (async () => {
+		// Create venv only if the python binary doesn't already exist.
+		if (!existsSync(VENV_PYTHON)) {
+			await runOrThrow(
+				["uv", "venv", VENV_DIR],
+				"uv venv failed",
+				`uv not found — install it first (https://github.com/astral-sh/uv, e.g. \`brew install uv\`)`,
+			);
+		}
+		// Cheap probe: is whisper importable inside the venv?
+		const probe = Bun.spawn([VENV_PYTHON, "-c", "import whisper"], {
+			stdout: "pipe", stderr: "pipe",
+		});
+		if ((await probe.exited) === 0) return;
+		// Install (this fetches torch + openai-whisper — ~1-2 GB, slow first time).
+		await runOrThrow(
+			["uv", "pip", "install", "--python", VENV_PYTHON, "openai-whisper"],
+			"uv pip install openai-whisper failed",
+			`uv not found — install it first (https://github.com/astral-sh/uv)`,
+		);
+	})().catch(err => {
+		// Reset on failure so the next request retries (e.g. user just installed uv).
+		envReady = undefined;
+		throw err;
+	});
+	return envReady;
+}
+
+async function runOrThrow(cmd: string[], failPrefix: string, enoentMsg: string): Promise<void> {
+	let proc: ReturnType<typeof Bun.spawn>;
+	try {
+		proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException)?.code;
+		if (code === "ENOENT") throw new Error(enoentMsg);
+		throw new Error(`${failPrefix}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	const exitCode = await proc.exited;
+	if (exitCode === 0) return;
+	const stderr = proc.stderr instanceof ReadableStream
+		? (await new Response(proc.stderr).text()).trim()
+		: "";
+	const lastLine = stderr.split("\n").pop() ?? `exit ${exitCode}`;
+	throw new Error(`${failPrefix}: ${lastLine}`);
+}
+
 export interface TranscribeOptions {
 	modelName?: string;
 	language?: string;
 }
+
+const TRANSCRIBE_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * Full pipeline: downloaded telegram file → wav → whisper → trimmed text.
@@ -121,9 +233,39 @@ export interface TranscribeOptions {
  * download is left in the voice cache (pruned by LRU).
  */
 export async function transcribeAudio(audioPath: string, options?: TranscribeOptions): Promise<string> {
+	await ensureWhisperEnv();
 	const wavPath = await convertToWav(audioPath);
 	try {
-		return (await transcribe(wavPath, options)).trim();
+		const proc = Bun.spawn(
+			[
+				VENV_PYTHON, "-c", TRANSCRIBE_SCRIPT,
+				wavPath,
+				options?.modelName ?? "base",
+				options?.language ?? "en",
+			],
+			{
+				stdout: "pipe",
+				stderr: "pipe",
+				// Pin whisper's model cache under ~/.omp-tg so it's removable
+				// with the rest of our state. XDG_CACHE_HOME → ~/.cache by
+				// default; whisper appends /whisper to whatever this resolves to.
+				env: { ...process.env, XDG_CACHE_HOME: MODEL_CACHE_DIR },
+			},
+		);
+		const timer = setTimeout(() => proc.kill(), TRANSCRIBE_TIMEOUT_MS);
+		const exitCode = await proc.exited;
+		clearTimeout(timer);
+		const stdout = proc.stdout instanceof ReadableStream
+			? await new Response(proc.stdout).text()
+			: "";
+		if (exitCode !== 0) {
+			const stderr = proc.stderr instanceof ReadableStream
+				? (await new Response(proc.stderr).text()).trim()
+				: "";
+			const lastLine = stderr.split("\n").pop() ?? `exit ${exitCode}`;
+			throw new Error(`Transcription failed: ${lastLine}`);
+		}
+		return stdout.trim();
 	} finally {
 		try {
 			unlinkSync(wavPath);
