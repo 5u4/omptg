@@ -19,6 +19,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent";
 import type { Bot } from "grammy";
 import { TelegramStreamer } from "./streamer.ts";
+import { TypingIndicator } from "./typing.ts";
 import { TelegramUI, type PendingUiRequest } from "./ui-bridge.ts";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { scoped } from "./logger.ts";
@@ -31,6 +32,26 @@ export interface ChatSessionOptions {
 	bot: Bot;
 }
 
+/**
+ * Pull the visible text out of an assistant message's content array.
+ * Assistant content is `(TextContent | ThinkingContent | RedactedThinking |
+ * ToolCall)[]` — we keep only `TextContent` so thinking blocks (when the
+ * provider exposes them) and tool-call payloads don't leak to the chat.
+ */
+function extractAssistantText(content: unknown): string {
+	if (!Array.isArray(content)) return "";
+	const parts: string[] = [];
+	for (const part of content) {
+		if (part && typeof part === "object"
+			&& (part as { type?: unknown }).type === "text"
+			&& typeof (part as { text?: unknown }).text === "string"
+		) {
+			parts.push((part as { text: string }).text);
+		}
+	}
+	return parts.join("").trim();
+}
+
 export class ChatSession {
 	readonly chatId: number;
 	cwd: string;
@@ -39,6 +60,7 @@ export class ChatSession {
 	private unsubscribe: (() => void) | undefined;
 	private streamer: TelegramStreamer | undefined;
 	private readonly ui: TelegramUI;
+	private readonly typing: TypingIndicator;
 	private readonly log;
 	/** First user message text in the current session, captured for title gen. */
 	private firstUserText: string | undefined;
@@ -51,6 +73,7 @@ export class ChatSession {
 		this.cwd = opts.cwd;
 		this.bot = opts.bot;
 		this.ui = new TelegramUI(opts.bot, opts.chatId);
+		this.typing = new TypingIndicator(opts.bot, opts.chatId);
 		this.log = scoped(`chat:${opts.chatId}`);
 	}
 
@@ -109,6 +132,7 @@ export class ChatSession {
 
 	async dispose(): Promise<void> {
 		this.unsubscribe?.();
+		this.typing.stop();
 		this.unsubscribe = undefined;
 		if (this.session) {
 			try {
@@ -160,19 +184,15 @@ export class ChatSession {
 		});
 	}
 
-	/** Send a user turn. Caller must wait via waitForIdle separately. */
+	/** Send a user turn. Caller must wait via waitForIdle separately.
+	 *  Starts the typing indicator; the caller must invoke
+	 *  `streamer.finalize()` after `waitForIdle()` returns so it can be
+	 *  stopped via the `agent_end` path (or the finalize fallback). */
 	async prompt(text: string): Promise<TelegramStreamer> {
 		const s = await this.ensure();
 		if (this.firstUserText === undefined) this.firstUserText = text;
-		const status = await this.bot.api.sendMessage(
-			this.chatId,
-			"✨ thinking…",
-		);
-		this.streamer = new TelegramStreamer(
-			this.bot,
-			this.chatId,
-			status.message_id,
-		);
+		this.streamer = new TelegramStreamer(this.bot, this.chatId);
+		this.typing.start();
 		if (s.isStreaming) {
 			await s.steer(text);
 		} else {
@@ -184,7 +204,16 @@ export class ChatSession {
 	async abort(): Promise<boolean> {
 		if (!this.session?.isStreaming) return false;
 		await this.session.abort();
+		this.typing.stop();
 		return true;
+	}
+
+	/** Finish the current turn: stop the typing bubble and finalize the
+	 *  streamer (clears the status message and ensures the user sees a
+	 *  reply even if the agent produced none). Idempotent. */
+	async endTurn(): Promise<void> {
+		this.typing.stop();
+		await this.streamer?.finalize();
 	}
 
 	/** Forward UI pending-request resolution from callback or text reply. */
@@ -201,14 +230,23 @@ export class ChatSession {
 	private handleEvent(event: AgentSessionEvent): void {
 		const s = this.streamer;
 		switch (event.type) {
-			case "message_update": {
-				const ame = event.assistantMessageEvent;
-				if (ame.type === "text_delta") s?.pushDelta(ame.delta);
+			// Text deltas are intentionally ignored. The previous design
+			// streamed every token into a placeholder message, which surfaced
+			// a lot of mid-turn reasoning prose to the chat. We now commit
+			// the assistant text once at `message_end`, leaving the typing
+			// indicator + tool status line as the only mid-turn signal.
+			case "message_end": {
+				const msg = (event as { message?: { role?: string; content?: unknown } }).message;
+				if (!msg || msg.role !== "assistant" || !s) break;
+				const text = extractAssistantText(msg.content);
+				if (text) void s.commitAssistant(text);
 				break;
 			}
 			case "tool_execution_start": {
 				const ev = event as { toolName?: string; args?: unknown };
-				if (ev.toolName) s?.pushStatus(renderToolStart(ev.toolName, ev.args));
+				if (ev.toolName) {
+					void s?.setStatus(renderToolStart(ev.toolName, ev.args));
+				}
 				break;
 			}
 			case "tool_execution_end": {
@@ -219,9 +257,9 @@ export class ChatSession {
 				};
 				if (ev.toolName && ev.isError) {
 					const line = renderToolEnd(ev.toolName, ev.result, ev.isError);
-					if (line) s?.pushStatus(line);
+					if (line) void s?.setStatus(line);
 				} else {
-					s?.pushStatus("");
+					void s?.setStatus("");
 				}
 				break;
 			}
@@ -232,10 +270,11 @@ export class ChatSession {
 			}
 			case "auto_retry_start": {
 				const ev = event as { attempt: number; maxAttempts: number };
-				s?.pushStatus(`🔄 retry ${ev.attempt}/${ev.maxAttempts}`);
+				void s?.setStatus(`🔄 retry ${ev.attempt}/${ev.maxAttempts}`);
 				break;
 			}
 			case "agent_end": {
+				this.typing.stop();
 				this.maybeGenerateTitle();
 				break;
 			}

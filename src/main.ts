@@ -429,10 +429,9 @@ bot.on("message:text", async ctx => {
 	// the chat asynchronously so we don't lose them.
 	void (async () => {
 		try {
-			const streamer = await chat.prompt(text);
+			await chat.prompt(text);
 			const s = await chat.ensure();
 			await s.waitForIdle();
-			await streamer.finalize();
 		} catch (err) {
 			log.error("turn.failed", {
 				chat_id: ctx.chat.id,
@@ -444,6 +443,8 @@ bot.on("message:text", async ctx => {
 			} catch (replyErr) {
 				log.error("turn.error_reply_failed", { err: String(replyErr) });
 			}
+		} finally {
+			await chat.endTurn();
 		}
 	})();
 });
