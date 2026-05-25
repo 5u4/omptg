@@ -27,31 +27,10 @@ to land in one session. Phases are loose — grab whatever feels useful.
 - unknown command reply
 - PM2 supervision + `ecosystem.config.cjs`
 - chunked streaming past 4096-char telegram limit (seals prior msg, opens new one)
-
+- MarkdownV2 rendering for assistant replies (telegramify-markdown + fence-safe split)
 ---
 
 ## Priority 1 — paper cuts you'll hit fast
-
-### P1.1 — Markdown rendering for assistant replies
-
-Right now `TelegramStreamer.flush()` calls `editMessageText(chat, id, text)`
-with no `parse_mode`. Agent output uses ``` code blocks, `**bold**`,
-`[link](url)`, but telegram shows raw markdown.
-
-**Approach**: detect that the agent emits markdown (always true) and send
-with `parse_mode: "MarkdownV2"`. Telegram MarkdownV2 escape rules are
-strict — every `_ * [ ] ( ) ~ \` > # + - = | { } . !` outside code must be
-backslash-escaped. Use a robust escaper; do NOT try to handwrite a regex.
-Reference implementation: search `escapeMarkdown` in
-`omp-tg-bridge/src/omp_telegram/markdown.py` (upstream python fork) or use
-`telegramify-markdown` from npm.
-
-**Watch out**: streaming deltas can split a ``` fence in half across two
-edits, telegram will reject as "can't parse entities". Buffer at fence
-boundaries before flushing. Falling back to plain text on parse error is OK.
-
-**Files**: `src/streamer.ts` (add `parse_mode` + escape), maybe new
-`src/markdown.ts` for the escaper. Smoke: `smoke-markdown.ts`.
 
 ### P1.3 — Image input from telegram
 
@@ -181,6 +160,13 @@ demo gif.
 ## Discoveries during dogfood (fill in as you hit them)
 
 <!-- pickup-here -->
+- P1.1 MarkdownV2: telegramify-markdown converts agent prose; chrome
+  paths (tool/preamble/notice/(no response)) stay plain text so an
+  errant escape can't break the heartbeat. Code fences are kept balanced
+  per chunk by closing+reopening across boundaries — see
+  `splitMarkdownForTelegram` in `src/markdown.ts`. On send failure
+  (BadRequest entity parsing) we retry the same chunk as plain text so
+  the user never gets nothing.
 - P1.2 chunking: reserved 196 chars of headroom for the status tail so the
   tool-render line doesn't push the active message past 4096 mid-flush.
   Split prefers the last newline within budget but requires it to be ≥ half

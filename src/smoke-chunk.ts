@@ -8,7 +8,7 @@
 import type { Bot } from "grammy";
 import { splitForTelegram, TelegramStreamer } from "./streamer.ts";
 
-interface SendCall { messageId: number; text: string; silent: boolean }
+interface SendCall { messageId: number; text: string; silent: boolean; parseMode?: string }
 interface EditCall { messageId: number; text: string }
 interface DeleteCall { messageId: number }
 
@@ -23,12 +23,17 @@ function makeFakeBot(): {
 	const deletes: DeleteCall[] = [];
 	let nextId = 1000;
 	const api = {
-		sendMessage(_chatId: number, text: string, opts?: { disable_notification?: boolean }) {
+		sendMessage(_chatId: number, text: string, opts?: { disable_notification?: boolean; parse_mode?: string }) {
 			if (text.length > 4096) {
 				throw new Error(`sendMessage would overflow: ${text.length} chars`);
 			}
 			const message_id = ++nextId;
-			sends.push({ messageId: message_id, text, silent: opts?.disable_notification === true });
+			sends.push({
+				messageId: message_id,
+				text,
+				silent: opts?.disable_notification === true,
+				parseMode: opts?.parse_mode,
+			});
 			return Promise.resolve({ message_id });
 		},
 		editMessageText(_chatId: number, messageId: number, text: string) {
@@ -78,7 +83,8 @@ async function main() {
 		await streamer.commitAssistant("hello world");
 		await streamer.finalize();
 		assert(sends.length === 1, `expected 1 send, got ${sends.length}`);
-		assert(sends[0]!.text === "hello world", "text mismatch");
+		assert(sends[0]!.text.trim() === "hello world", `text mismatch: ${sends[0]!.text}`);
+		assert(sends[0]!.parseMode === "MarkdownV2", "assistant reply should use MarkdownV2");
 		assert(edits.length === 0 && deletes.length === 0, "no status traffic expected");
 		console.log("✓ short commit stays in one message");
 	}
@@ -98,7 +104,8 @@ async function main() {
 			`expected 3 sends (2 tools + commit), got ${sends.length}`);
 		assert(sends[0]!.text === "📖 read foo.ts", "call-1 start text");
 		assert(sends[1]!.text === "💻 bash: ls", "call-2 start text");
-		assert(sends[2]!.text === "done", "commit text");
+		assert(sends[2]!.text.trim() === "done", "commit text");
+		assert(sends[2]!.parseMode === "MarkdownV2", "assistant reply should use MarkdownV2");
 		assert(edits.length === 2, `expected 2 edits, got ${edits.length}`);
 		// Match edits to their original send by messageId.
 		const editFor = (id: number) => edits.find(e => e.messageId === id);
@@ -144,7 +151,7 @@ async function main() {
 		await streamer.finalize();
 		assert(sends.length === 2, `expected notice + commit, got ${sends.length}`);
 		assert(sends[0]!.text === "🔄 retry 1/3", "notice text");
-		assert(sends[1]!.text === "ok", "commit text");
+		assert(sends[1]!.text.trim() === "ok", "commit text");
 		assert(edits.length === 0 && deletes.length === 0, "notice should not edit/delete");
 		console.log("✓ notice is its own persistent message");
 	}
@@ -186,11 +193,12 @@ async function main() {
 		await streamer.notice("🔄 retry 1/3");
 		await streamer.commitAssistant("here is the real reply");
 		await streamer.finalize();
-		const find = (text: string) => sends.find(s => s.text === text);
+		const find = (text: string) => sends.find(s => s.text.trim() === text);
 		assert(find("📖 read x")?.silent === true, "tool start must be silent");
 		assert(find("💭 about to do thing")?.silent === true, "preamble must be silent");
 		assert(find("🔄 retry 1/3")?.silent === true, "notice must be silent");
 		assert(find("here is the real reply")?.silent === false, "assistant reply must NOT be silent");
+		assert(find("here is the real reply")?.parseMode === "MarkdownV2", "assistant reply parse mode");
 		console.log("✓ chrome silent, assistant reply notifies");
 	}
 }

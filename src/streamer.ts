@@ -19,6 +19,7 @@
  * newline fits in the second half of the budget).
  */
 import type { Bot } from "grammy";
+import { splitMarkdownForTelegram } from "./markdown.ts";
 
 const MAX_MESSAGE_LEN = 4096;
 /** Truncation budget for mid-turn assistant preambles (one-line heartbeat). */
@@ -43,13 +44,19 @@ export class TelegramStreamer {
 		private readonly chatId: number,
 	) {}
 
-	/** Commit a finalized assistant text block as one or more messages. */
+	/**
+	 * Commit a finalized assistant text block. Converts source markdown to
+	 * MarkdownV2 (preserving code fences across chunk boundaries) and sends
+	 * with parse_mode so bold/code/links/lists render. Falls back to a
+	 * plain-text send if telegram rejects the entities (catastrophic escape
+	 * bug, weird code-block content, etc.).
+	 */
 	async commitAssistant(text: string): Promise<void> {
 		if (this.finalized) return;
 		const trimmed = text.trim();
 		if (!trimmed) return;
-		for (const chunk of splitForTelegram(trimmed)) {
-			await this.send(chunk);
+		for (const chunk of splitMarkdownForTelegram(trimmed)) {
+			await this.sendMarkdown(chunk);
 		}
 		this.committedAny = true;
 	}
@@ -147,6 +154,23 @@ export class TelegramStreamer {
 			});
 		} catch (err) {
 			console.warn("[send] failed:", errMsg(err));
+		}
+	}
+
+	/**
+	 * Send a pre-converted MarkdownV2 chunk. If telegram rejects the entity
+	 * parsing (any 400 BAD REQUEST or "can't parse entities"), we fall back
+	 * to the raw text via plain send() so the user still sees something.
+	 */
+	private async sendMarkdown(md: string): Promise<void> {
+		try {
+			await this.bot.api.sendMessage(this.chatId, md, {
+				parse_mode: "MarkdownV2",
+			});
+		} catch (err) {
+			const m = errMsg(err);
+			console.warn("[md-send] failed, falling back to plain:", m);
+			await this.send(md);
 		}
 	}
 }
