@@ -42,6 +42,10 @@ export class TelegramStreamer {
 	constructor(
 		private readonly bot: Bot,
 		private readonly chatId: number,
+		/** Telegram message_id of the user's prompt for this turn. The first
+		 *  assistant chunk replies to this so the user can see what their
+		 *  turn produced. undefined for synthetic turns (smokes). */
+		private readonly replyTo?: number,
 	) {}
 
 	/**
@@ -55,10 +59,12 @@ export class TelegramStreamer {
 		if (this.finalized) return;
 		const trimmed = text.trim();
 		if (!trimmed) return;
-		for (const chunk of splitMarkdownForTelegram(trimmed)) {
-			await this.sendMarkdown(chunk);
+		const chunks = splitMarkdownForTelegram(trimmed);
+		for (let i = 0; i < chunks.length; i++) {
+			// Only the first chunk carries reply_to so the conversation
+			// stays anchored to the user's prompt without nesting noise.
+			await this.sendMarkdown(chunks[i]!, i === 0 ? this.replyTo : undefined);
 		}
-
 	}
 
 	/** New tool started: post a persistent status message for it. */
@@ -147,10 +153,13 @@ export class TelegramStreamer {
 		await this.send(text);
 	}
 
-	private async send(text: string, opts?: { silent?: boolean }): Promise<void> {
+	private async send(text: string, opts?: { silent?: boolean; replyTo?: number }): Promise<void> {
 		try {
 			await this.bot.api.sendMessage(this.chatId, text, {
 				disable_notification: opts?.silent ?? false,
+				...(opts?.replyTo !== undefined && {
+					reply_parameters: { message_id: opts.replyTo },
+				}),
 			});
 		} catch (err) {
 			console.warn("[send] failed:", errMsg(err));
@@ -165,15 +174,18 @@ export class TelegramStreamer {
 	 * noise) and tells the user we hit a converter edge case rather than
 	 * dropping the message.
 	 */
-	private async sendMarkdown(chunk: { src: string; md: string }): Promise<void> {
+	private async sendMarkdown(chunk: { src: string; md: string }, replyTo?: number): Promise<void> {
 		try {
 			await this.bot.api.sendMessage(this.chatId, chunk.md, {
 				parse_mode: "MarkdownV2",
+				...(replyTo !== undefined && {
+					reply_parameters: { message_id: replyTo },
+				}),
 			});
 		} catch (err) {
 			const m = errMsg(err);
 			console.warn("[md-send] failed, falling back to source plain:", m);
-			await this.send(chunk.src);
+			await this.send(chunk.src, { replyTo });
 		}
 	}
 }

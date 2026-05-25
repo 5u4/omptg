@@ -552,6 +552,7 @@ bot.on("message:text", async ctx => {
 			if (chat.isStreaming) {
 				await ctx.reply("↪ steered (/cancel to abort)", {
 					disable_notification: true,
+					reply_parameters: { message_id: ctx.message.message_id },
 				});
 			}
 			// Wrap order: forward first (the message itself is the quoted
@@ -561,7 +562,7 @@ bot.on("message:text", async ctx => {
 			let promptText = text;
 			if (forward) promptText = formatForwardPrompt(forward, "");
 			if (reply) promptText = formatReplyPrompt(reply, promptText);
-			await chat.prompt(promptText);
+			await chat.prompt(promptText, { replyTo: ctx.message.message_id });
 			const s = await chat.ensure();
 			await s.waitForIdle();
 		} catch (err) {

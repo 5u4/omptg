@@ -280,10 +280,10 @@ export class ChatSession {
 	 *  Starts the typing indicator; the caller must invoke
 	 *  `streamer.finalize()` after `waitForIdle()` returns so it can be
 	 *  stopped via the `agent_end` path (or the finalize fallback). */
-	async prompt(text: string): Promise<TelegramStreamer> {
+	async prompt(text: string, opts?: { replyTo?: number }): Promise<TelegramStreamer> {
 		const s = await this.ensure();
 		if (this.firstUserText === undefined) this.firstUserText = text;
-		this.streamer = new TelegramStreamer(this.bot, this.chatId);
+		this.streamer = new TelegramStreamer(this.bot, this.chatId, opts?.replyTo);
 		this.typing.start();
 		if (s.isStreaming) {
 			await s.steer(text);
