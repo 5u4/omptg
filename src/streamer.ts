@@ -5,19 +5,26 @@
  * - Assistant text is committed once at `message_end` (chat.ts) and posted
  *   as one or more sendMessage calls. We don't stream token-by-token —
  *   the resulting mid-turn reasoning prose was noisy in telegram.
- * - Each tool invocation gets its OWN persistent message: send the
- *   `📖 read foo.ts` line at `tool_execution_start`, then edit that same
- *   message id to `✅ read foo.ts` (or `❌ … : <detail>`) on
- *   `tool_execution_end`. Concurrent tools are matched by `toolCallId`.
- * - Transient notices (auto_retry, etc.) are posted as their own
- *   sendMessage so they also live in the history.
+ * - All "muted" status (tool start/end, mid-turn preambles, retry
+ *   notices) is coalesced into a single rolling **activity message**:
+ *   the first event sends one telegram message, subsequent events append
+ *   a line and `editMessageText` the same message id. `tool_execution_end`
+ *   rewrites the original `📖 …` line in place to `✅ …` / `❌ … : <detail>`
+ *   via a saved `{host, lineIndex}` reference. Concurrent tools are
+ *   matched by `toolCallId`.
+ * - When an activity message hits either cap (ACTIVITY_CHAR_CAP /
+ *   ACTIVITY_LINE_CAP), it is sealed (we drop our `this.activity`
+ *   reference) and the next event opens a fresh send. Already-recorded
+ *   `toolMsgs` entries keep editing the OLD sealed message — telegram
+ *   allows edits for ~48h, so cross-seal `toolEnd` rewrites still work.
  * - finalize() never deletes messages and never posts a placeholder. If a
- *   turn produced no assistant text, the tool messages alone tell the
- *   story; a bare "(no response)" line was just noise in chat.
+ *   turn produced no assistant text, the activity message(s) alone tell
+ *   the story; a bare "(no response)" line was just noise in chat.
  *
  * Telegram caps a single message at 4096 chars; long assistant replies
  * are split at the last newline within budget (or a hard split if no
- * newline fits in the second half of the budget).
+ * newline fits in the second half of the budget). The activity caps sit
+ * well below 4096 so a late append never overflows mid-edit.
  */
 import type { Bot } from "grammy";
 import { splitMarkdownForTelegram } from "./markdown.ts";
@@ -26,6 +33,18 @@ import { scoped } from "./logger.ts";
 const MAX_MESSAGE_LEN = 4096;
 /** Truncation budget for mid-turn assistant preambles (one-line heartbeat). */
 const PREAMBLE_LEN = 80;
+/**
+ * Coalesce muted activity (preambles, tool status, notices) into a single
+ * rolling telegram message that we `editMessageText` as new lines arrive.
+ * When either cap is hit, the current message is sealed (tool-end edits
+ * to lines it already contains still work — telegram allows edits for
+ * ~48h) and the next event opens a fresh activity message.
+ *
+ * Caps chosen well under telegram's 4096-char hard limit so a late tool
+ * line never overflows mid-append.
+ */
+const ACTIVITY_CHAR_CAP = 3500;
+const ACTIVITY_LINE_CAP = 25;
 
 /** Replace the leading status emoji (start-of-tool icon) with a result one. */
 function withResultIcon(startLine: string, icon: "✅" | "❌"): string {
@@ -35,9 +54,37 @@ function withResultIcon(startLine: string, icon: "✅" | "❌"): string {
 	return `${icon}${startLine.slice(sp)}`;
 }
 
+/**
+ * Tracking state for a single rolling activity message. `lines` is the
+ * authoritative buffer; `renderedText` is what we last sent to telegram
+ * so we can skip edits that wouldn't change anything (avoids "message
+ * is not modified" 400s and the per-message edit-rate ceiling).
+ */
+interface ActivityMessage {
+	messageId: number;
+	lines: string[];
+	/** Sum of line lengths + newline joins; cached so cap checks are O(1). */
+	charCount: number;
+	renderedText: string;
+}
+
 export class TelegramStreamer {
-	/** message_id of the in-flight tool status, keyed by toolCallId. */
-	private readonly toolMsgs = new Map<string, { messageId: number; startLine: string }>();
+	/**
+	 * Rolling "activity" message — one telegram message that grows by
+	 * `editMessageText` as preamble / tool-status / notice lines arrive.
+	 * `null` means we have no open activity message; the next muted event
+	 * will send one. When a cap is hit we null this out (sealing the
+	 * current message) so the next event opens a fresh one.
+	 */
+	private activity: ActivityMessage | null = null;
+	/**
+	 * Map toolCallId → reference to the activity message + line index that
+	 * currently holds its `📖 …` start line. `toolEnd` mutates that line
+	 * to `✅`/`❌` and edits the host message in place. The reference
+	 * survives across seals: editing an already-sealed activity message is
+	 * still fine (telegram allows edits for ~48h).
+	 */
+	private readonly toolMsgs = new Map<string, { host: ActivityMessage; lineIndex: number }>();
 	private finalized = false;
 	private readonly log = scoped("streamer");
 	/**
@@ -109,26 +156,23 @@ export class TelegramStreamer {
 		}
 	}
 
-	/** New tool started: post a persistent status message for it. */
+	/**
+	 * New tool started: append a `📖 …` line to the current activity
+	 * message (opening one if needed) and remember where the line landed
+	 * so `toolEnd` can rewrite it in place.
+	 */
 	async toolStart(toolCallId: string, line: string): Promise<void> {
 		if (this.finalized || !line) return;
-		// Defensive: if we somehow see the same id twice, replace the old entry
-		// (the prior message stays in chat but is no longer tracked).
-		try {
-			const sent = await this.bot.api.sendMessage(this.chatId, line, {
-				disable_notification: true,
-				...this.topicOpts(),
-			});
-			this.toolMsgs.set(toolCallId, {
-				messageId: sent.message_id,
-				startLine: line,
-			});
-		} catch (err) {
-			console.warn("[tool-start] send failed:", errMsg(err));
-		}
+		const placement = await this.appendActivityLine(line);
+		if (placement) this.toolMsgs.set(toolCallId, placement);
 	}
 
-	/** Tool finished: rewrite its message in place with ✅ or ❌ <detail>. */
+	/**
+	 * Tool finished: locate the line we wrote at `toolStart` and rewrite
+	 * it in place to `✅` / `❌ <detail>`. The host activity message may
+	 * already be sealed (a later tool tipped it over the cap); editing
+	 * old lines is still fine since telegram allows edits for ~48h.
+	 */
 	async toolEnd(
 		toolCallId: string,
 		isError: boolean,
@@ -138,33 +182,29 @@ export class TelegramStreamer {
 		const entry = this.toolMsgs.get(toolCallId);
 		if (!entry) return; // never saw the start — nothing to edit
 		this.toolMsgs.delete(toolCallId);
+		const current = entry.host.lines[entry.lineIndex];
+		if (current === undefined) return;
 		const next = isError
-			? errorLine || withResultIcon(entry.startLine, "❌")
-			: withResultIcon(entry.startLine, "✅");
-		if (next === entry.startLine) return;
-		try {
-			await this.bot.api.editMessageText(this.chatId, entry.messageId, next);
-		} catch (err) {
-			const msg = errMsg(err);
-			if (!msg.includes("not modified")) {
-				console.warn("[tool-end] edit failed:", msg);
-			}
-		}
-		// Note: editMessageText doesn't carry disable_notification; the
-		// original send was silent and editing it doesn't re-notify.
+			? errorLine || withResultIcon(current, "❌")
+			: withResultIcon(current, "✅");
+		if (next === current) return;
+		entry.host.lines[entry.lineIndex] = next;
+		await this.flushActivity(entry.host);
 	}
 
-	/** One-shot informational line (retries, notices). Posted as its own msg. */
+	/** One-shot informational line (retries, notices). Coalesced into the
+	 *  rolling activity message just like tool status. */
 	async notice(line: string): Promise<void> {
 		if (this.finalized || !line) return;
-		await this.send(line, { silent: true });
+		await this.appendActivityLine(line);
 	}
 
 	/**
 	 * Mid-turn "preamble" assistant text: the model said something before
 	 * calling a tool. Show a short heartbeat (first PREAMBLE_LEN chars +
 	 * ellipsis if truncated) so the user feels progress without flooding
-	 * the chat with mid-turn reasoning prose. Never chunked.
+	 * the chat with mid-turn reasoning prose. Appended to the rolling
+	 * activity message; never chunked.
 	 */
 	async commitPreamble(text: string): Promise<void> {
 		if (this.finalized) return;
@@ -173,9 +213,87 @@ export class TelegramStreamer {
 		const line = trimmed.length > PREAMBLE_LEN
 			? `💭 ${trimmed.slice(0, PREAMBLE_LEN).trimEnd()}…`
 			: `💭 ${trimmed}`;
-		await this.send(line, { silent: true });
+		await this.appendActivityLine(line);
 		// Preambles don't count toward "did we say anything"; the real
 		// reply at agent_end is what satisfies the (no response) guard.
+	}
+
+	/**
+	 * Append `line` to the current rolling activity message, sealing and
+	 * opening a fresh one if the addition would breach either cap. Returns
+	 * the host + line index so callers (toolStart) can edit the line later.
+	 * Returns null only on a send failure for a brand-new activity message.
+	 */
+	private async appendActivityLine(
+		line: string,
+	): Promise<{ host: ActivityMessage; lineIndex: number } | null> {
+		const cur = this.activity;
+		// `+1` covers the newline join. Seal & start fresh when the new
+		// line would tip either cap.
+		const wouldOverflow = cur !== null && (
+			cur.lines.length + 1 > ACTIVITY_LINE_CAP ||
+			cur.charCount + 1 + line.length > ACTIVITY_CHAR_CAP
+		);
+		if (cur && !wouldOverflow) {
+			const lineIndex = cur.lines.length;
+			cur.lines.push(line);
+			cur.charCount += 1 + line.length;
+			await this.flushActivity(cur);
+			return { host: cur, lineIndex };
+		}
+		// Open a fresh activity message. Sealing the previous one is just
+		// dropping our reference — its toolMsgs entries (if any) still
+		// point at it and can be edited.
+		try {
+			const sent = await this.bot.api.sendMessage(this.chatId, line, {
+				disable_notification: true,
+				link_preview_options: { is_disabled: true },
+				...this.topicOpts(),
+			});
+			const host: ActivityMessage = {
+				messageId: sent.message_id,
+				lines: [line],
+				charCount: line.length,
+				renderedText: line,
+			};
+			this.activity = host;
+			return { host, lineIndex: 0 };
+		} catch (err) {
+			this.log.warn("activity.send_failed", { err: errMsg(err) });
+			return null;
+		}
+	}
+
+	/**
+	 * Re-render `host.lines` and `editMessageText` if the result differs
+	 * from what we last sent for that message. No-op when nothing changed
+	 * (avoids telegram's "message is not modified" 400s).
+	 */
+	private async flushActivity(host: ActivityMessage): Promise<void> {
+		const text = host.lines.join("\n");
+		if (text === host.renderedText) return;
+		try {
+			await this.bot.api.editMessageText(this.chatId, host.messageId, text, {
+				// URL-containing lines (bash: curl …, read https://…) would
+				// otherwise pop a link-preview card on every edit, flickering
+				// the rolling message. Suppress.
+				link_preview_options: { is_disabled: true },
+			});
+			// Only update the cache on success. Updating it BEFORE the await
+			// would poison the diff on transient edit failures: a later
+			// toolEnd rewrite back to the failed text would early-return at
+			// the `text === renderedText` check and leave stale chat content.
+			host.renderedText = text;
+		} catch (err) {
+			const msg = errMsg(err);
+			if (msg.includes("not modified")) {
+				// Telegram confirms it already has this exact text — cache
+				// is in sync regardless of what we thought it held.
+				host.renderedText = text;
+				return;
+			}
+			this.log.warn("activity.edit_failed", { err: msg });
+		}
 	}
 
 	async finalize(): Promise<void> {
@@ -197,12 +315,14 @@ export class TelegramStreamer {
 		// the tool messages already show what happened, and a bare
 		// "(no response)" line was just noise.
 		this.toolMsgs.clear();
+		this.activity = null;
 	}
 
 	/** Surface an error after a turn fails: send verbatim text. */
 	async replaceWith(text: string): Promise<void> {
 		this.finalized = true;
 		this.toolMsgs.clear();
+		this.activity = null;
 		await this.send(text);
 	}
 
