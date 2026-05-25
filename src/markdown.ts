@@ -67,6 +67,24 @@ function fenceTables(src: string): string {
 }
 
 /**
+ * Replace markdown horizontal-rule lines (`---`, `***`, `___`, optionally
+ * with internal spaces, on a line by themselves) with an em-dash row.
+ *
+ * telegramify-markdown emits HR lines verbatim, but MarkdownV2 has no
+ * concept of an HR and treats `-` / `*` / `_` as reserved characters.
+ * Telegram then rejects the whole message with
+ * `Character '-' is reserved and must be escaped`. We can't safely
+ * post-escape (would mangle legitimate `\-` already in the converter
+ * output), so neutralize at the source.
+ */
+function neutralizeHorizontalRules(src: string): string {
+	return src
+		.split("\n")
+		.map(line => /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line) ? "———" : line)
+		.join("\n");
+}
+
+/**
  * Split `text` into chunks of at most `budget` characters (after telegramify
  * conversion) such that fenced code blocks never span a chunk boundary.
  * Returns the MarkdownV2 strings ready to send.
@@ -94,8 +112,9 @@ export function splitMarkdownForTelegram(
 	budget = MAX_MESSAGE_LEN,
 ): MarkdownChunk[] {
 	// Wrap GFM tables in code fences BEFORE line-walking so the fence-balance
-	// logic below treats them as ordinary fenced blocks.
-	const lines = fenceTables(text).split("\n");
+	// logic below treats them as ordinary fenced blocks. Strip markdown HR
+	// lines first so telegramify can't emit a raw `---` that Telegram rejects.
+	const lines = fenceTables(neutralizeHorizontalRules(text)).split("\n");
 	const out: MarkdownChunk[] = [];
 	let buf: string[] = [];
 	let openInfo: string | null = null;
