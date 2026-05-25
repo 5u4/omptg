@@ -17,6 +17,14 @@ import { parseCallback } from "./ui-bridge.ts";
 import { extractThreadId } from "./topic.ts";
 import { formatReplyPrompt, formatForwardPrompt, type ReplyContext, type ForwardContext } from "./quote.ts";
 import { downloadPhotoToCache } from "./media.ts";
+import { downloadVoiceToCache, transcribeAudio } from "./voice.ts";
+import {
+	PendingVoiceStore,
+	encodeVoiceCallback,
+	parseVoiceCallback,
+	freshVoiceId,
+} from "./pending-voice.ts";
+
 import { initTheme } from "@oh-my-pi/pi-coding-agent";
 import { scoped, logPath } from "./logger.ts";
 
@@ -66,6 +74,9 @@ function resolveDir(path: string): string {
 const bot = new Bot(TOKEN);
 const chatStore = new ChatStore();
 const registry = new ChatRegistry(bot, DEFAULT_CWD, chatStore);
+const pendingVoice = new PendingVoiceStore();
+const STT_MODEL = Bun.env.OMP_TG_STT_MODEL || "base";
+const STT_LANGUAGE = Bun.env.OMP_TG_STT_LANG || "en";
 
 // Log every inbound update before any guards so we can see callback_query
 // updates even when the allow-list later drops them.
@@ -509,6 +520,43 @@ bot.command("retitle", async ctx => {
 	);
 });
 
+async function dispatchVoiceText(
+	chatId: number,
+	threadId: number | undefined,
+	text: string,
+	replyTo: number,
+): Promise<void> {
+	const chat = registry.get(chatId, threadId);
+	try {
+		if (chat.isStreaming) {
+			await bot.api.sendMessage(chatId, "↪ steered (/cancel to abort)", {
+				disable_notification: true,
+				reply_parameters: { message_id: replyTo },
+				...(threadId !== undefined ? { message_thread_id: threadId } : {}),
+			});
+		}
+		await chat.prompt(text, { replyTo });
+		const s = await chat.ensure();
+		await s.waitForIdle();
+	} catch (err) {
+		log.error("voice_turn.failed", { chat_id: chatId, err: String(err) });
+		try {
+			await bot.api.sendMessage(
+				chatId,
+				`❌ ${err instanceof Error ? err.message : String(err)}`,
+				{
+					reply_parameters: { message_id: replyTo },
+					...(threadId !== undefined ? { message_thread_id: threadId } : {}),
+				},
+			);
+		} catch (replyErr) {
+			log.error("voice_turn.error_reply_failed", { err: String(replyErr) });
+		}
+	} finally {
+		await chat.endTurn();
+	}
+}
+
 // Inline-keyboard callbacks: route to the per-chat UI bridge.
 bot.on("callback_query:data", async ctx => {
 	const data = ctx.callbackQuery.data;
@@ -520,6 +568,36 @@ bot.on("callback_query:data", async ctx => {
 		ctx_chat_id_alias: ctx.chatId,
 		msg_chat_id: ctx.callbackQuery.message?.chat.id,
 	});
+	// Voice approval shortcut — own prefix, independent of TelegramUI state.
+	const voice = parseVoiceCallback(data);
+	if (voice) {
+		const chatId = ctx.chatId ?? ctx.callbackQuery.message?.chat.id;
+		if (chatId === undefined) {
+			await ctx.answerCallbackQuery("no chat context");
+			return;
+		}
+		const entry = pendingVoice.take(voice.id);
+		if (!entry) {
+			await ctx.answerCallbackQuery("expired");
+		} else {
+			await ctx.answerCallbackQuery(voice.action === "send" ? "sent" : "discarded");
+		}
+		if (ctx.callbackQuery.message) {
+			try {
+				await ctx.api.editMessageReplyMarkup(
+					ctx.callbackQuery.message.chat.id,
+					ctx.callbackQuery.message.message_id,
+					{ reply_markup: { inline_keyboard: [] } },
+				);
+			} catch (err) {
+				log.warn("voice.strip_keyboard_failed", { err: String(err) });
+			}
+		}
+		if (entry && voice.action === "send") {
+			void dispatchVoiceText(entry.chatId, entry.threadId, entry.text, entry.replyTo);
+		}
+		return;
+	}
 	if (!parsed) {
 		await ctx.answerCallbackQuery();
 		return;
@@ -584,6 +662,96 @@ function knownCommands(): Set<string> {
 // (history + caption + when to look), the vision model only sees one
 // image at a time, and history stays text-only so subsequent turns
 // don't need vision-capable models.
+// Voice input — transcribe locally with whisper, show the text with
+// [send / cancel] buttons before dispatching. Editing the transcription
+// is done by replying to the bot's transcription message with a corrected
+// version (see message:text handler below). Telegram voice notes are
+// OGG Opus; Audio attachments may be mp3/m4a/etc — both routed here.
+async function handleVoiceMessage(
+	chatId: number,
+	threadId: number | undefined,
+	replyTo: number,
+	fileId: string,
+	sendInitial: (text: string, opts: Record<string, unknown>) => Promise<{ message_id: number }>,
+): Promise<void> {
+	const topicOpts = threadId !== undefined ? { message_thread_id: threadId } : {};
+	const heartbeat = await sendInitial("🎤 transcribing…", {
+		reply_parameters: { message_id: replyTo },
+		...topicOpts,
+	});
+	try {
+		const { path, bytes } = await downloadVoiceToCache(bot, fileId);
+		log.info("voice.cached", { chat_id: chatId, path, bytes });
+		const text = await transcribeAudio(path, {
+			modelName: STT_MODEL,
+			language: STT_LANGUAGE,
+		});
+		if (!text) {
+		await bot.api.editMessageText(
+				chatId,
+				heartbeat.message_id,
+				"🎤 (empty transcription)",
+			);
+			return;
+		}
+		const id = freshVoiceId();
+		const body = [
+			"🎤 transcription:",
+			text,
+			"",
+			"↳ tap ✅ to send · reply to this message to edit · ❌ to discard",
+		].join("\n");
+		await bot.api.editMessageText(chatId, heartbeat.message_id, body, {
+			reply_markup: {
+				inline_keyboard: [[
+					{ text: "✅ send", callback_data: encodeVoiceCallback("send", id) },
+					{ text: "❌ cancel", callback_data: encodeVoiceCallback("cancel", id) },
+				]],
+			},
+		});
+		pendingVoice.put({
+			id,
+			chatId,
+			threadId,
+			replyTo,
+			transcriptMessageId: heartbeat.message_id,
+			text,
+		});
+		log.info("voice.transcribed", { chat_id: chatId, id, chars: text.length });
+	} catch (err) {
+		log.error("voice.failed", { chat_id: chatId, err: String(err) });
+		const msg = err instanceof Error ? err.message : String(err);
+		try {
+			await bot.api.editMessageText(chatId, heartbeat.message_id, `❌ ${msg}`);
+		} catch {
+			await bot.api.sendMessage(chatId, `❌ ${msg}`, {
+				reply_parameters: { message_id: replyTo },
+				...topicOpts,
+			});
+		}
+	}
+}
+
+bot.on("message:voice", async ctx => {
+	await handleVoiceMessage(
+		ctx.chat.id,
+		extractThreadId(ctx.message),
+		ctx.message.message_id,
+		ctx.message.voice.file_id,
+		(text, opts) => ctx.reply(text, opts),
+	);
+});
+
+bot.on("message:audio", async ctx => {
+	await handleVoiceMessage(
+		ctx.chat.id,
+		extractThreadId(ctx.message),
+		ctx.message.message_id,
+		ctx.message.audio.file_id,
+		(text, opts) => ctx.reply(text, opts),
+	);
+});
+
 bot.on("message:photo", async ctx => {
 	const photos = ctx.message.photo;
 	const largest = photos[photos.length - 1];
@@ -635,6 +803,28 @@ bot.on("message:photo", async ctx => {
 });
 
 bot.on("message:text", async ctx => {
+	// Voice transcription override: if the user replied to one of our
+	// "🎤 transcription:" messages with a corrected version, swap that
+	// in and dispatch as if they tapped ✅. The original keyboard is
+	// stripped so the buttons can't be re-used.
+	const replyToId = ctx.message.reply_to_message?.message_id;
+	if (replyToId !== undefined) {
+		const edited = pendingVoice.takeByTranscriptMessage(ctx.chat.id, replyToId);
+		if (edited) {
+			try {
+				await ctx.api.editMessageReplyMarkup(
+					ctx.chat.id,
+					edited.transcriptMessageId,
+					{ reply_markup: { inline_keyboard: [] } },
+				);
+			} catch (err) {
+				log.warn("voice.edit.strip_keyboard_failed", { err: String(err) });
+			}
+			await ctx.reply("↪ using edited transcription");
+			void dispatchVoiceText(edited.chatId, edited.threadId, ctx.message.text, edited.replyTo);
+			return;
+		}
+	}
 	const rawText = ctx.message.text;
 	// Detect telegram's native reply (long-press → reply). The replied-to
 	// message is in `reply_to_message`; we wrap it as a markdown blockquote

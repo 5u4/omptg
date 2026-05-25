@@ -19,6 +19,11 @@ JSON-RPC marshalling.
 - Group chats: auth allows update if EITHER `from.id` OR `chat.id` is allow-listed
 - Slash commands registered across `default` / `all_private_chats` /
   `all_group_chats` / `all_chat_administrators` scopes
+- Voice input: `message:voice` / `:audio` → ffmpeg → local openai-whisper →
+  `[✅ send] [❌ cancel]` keyboard before dispatching; reply to the
+  transcription message with a correction to override. Requires `ffmpeg`
+  + `pip install openai-whisper`. Tunables: `OMP_TG_STT_MODEL` (default
+  `base`), `OMP_TG_STT_LANG` (default `en`).
 
 ## Quick start
 

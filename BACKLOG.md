@@ -38,6 +38,8 @@ to land in one session. Phases are loose — grab whatever feels useful.
 - `/resume` with no arg defaults to most recent session in cwd (independent of /sessions cache)
 - bun:test coverage for `tool-render`, `chat-store`, `ui-bridge` (parseCallback + resolve matrix) — run with `bun test test/`
 - forum topics: ChatRegistry keyed by `(chatId, threadId)`; per-topic cwd bindings (topic → group → default); `message_thread_id` routed on every send / edit / typing / UI prompt; General topic shares the group key for zero-migration
+- voice input via `message:voice` / `message:audio` → ffmpeg → openai-whisper (local, via `@oh-my-pi/pi-coding-agent/stt`) → `[✅ send] [❌ cancel]` keyboard, with reply-to-transcription as the edit channel. `OMP_TG_STT_MODEL` (default `base`) and `OMP_TG_STT_LANG` (default `en`) tune the engine.
+
 
 ---
 
@@ -47,16 +49,8 @@ to land in one session. Phases are loose — grab whatever feels useful.
 
 
 
-### P2.4 — Voice input (whisper)
+### ~~P2.4 — Voice input (whisper)~~  ✓ done
 
-You send a voice note → transcribe → prompt as if typed.
-
-**Approach**: `bot.on("message:voice")` → download → run whisper.cpp
-binary OR send to OpenAI whisper API. Show the transcription to the user
-with an inline `[✅ send] [✏️ edit] [❌ cancel]` keyboard before dispatching
-(so misrecognition doesn't burn agent tokens).
-
-Look at `omp-tg-bridge` for prior art if helpful.
 
 ---
 
