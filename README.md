@@ -27,22 +27,76 @@ JSON-RPC marshalling.
   Tunables: `OMP_TG_STT_MODEL` (default `base`, try `small` for non-English),
   `OMP_TG_STT_LANG` (default `en`, or `auto` for whisper's language detector).
 
+## Prerequisites
+
+- [Bun](https://bun.sh) ≥ 1.3 — `curl -fsSL https://bun.sh/install | bash`
+- [`ffmpeg`](https://ffmpeg.org) — required for voice input. `brew install ffmpeg` / `apt install ffmpeg`.
+- [`uv`](https://github.com/astral-sh/uv) — required for voice input (used to bootstrap an isolated whisper venv at `~/.omp-tg/whisper-venv/`). `brew install uv` / `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+- [PM2](https://pm2.keymetrics.io) — recommended for production. `bun install -g pm2`.
+
+ffmpeg + uv are only consulted the first time a voice message arrives; if you don't plan to speak to the bot you can skip them.
+
 ## Quick start
+
+### 1. Create the bot
+
+Open Telegram, talk to [@BotFather](https://t.me/botfather):
+
+```
+/newbot
+<pick a display name>
+<pick a username ending in "bot">
+```
+
+BotFather replies with an HTTP API token that looks like
+`123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ`. Keep it — that's `TELEGRAM_BOT_TOKEN`.
+
+### 2. Find your user id
+
+Talk to [@userinfobot](https://t.me/userinfobot) once. It replies with your
+numeric Telegram user id (something like `1603972061`). That's the value
+for `TELEGRAM_ALLOWED_CHATS` — the bot will refuse every other sender.
+
+Putting **your user id** (not a chat id) here means you can DM the bot AND
+use it in any group you're already a member of, without enumerating each
+group separately. Add group ids (negative numbers) only when you want
+*everyone* in that group to talk to the bot.
+
+### 3. Boot it
 
 ```sh
 bun install
-
-# Verify the SDK side works on your machine (no telegram needed).
-bun run src/smoke.ts /path/to/repo
-
-# Wire telegram.
 cp .env.example .env
-# fill TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_CHATS
-# OMP_DEFAULT_CWD is optional (falls back to ~/.omp-tg/, auto-created)
+# fill TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_CHATS, save
 bun start
 ```
 
-Then DM the bot. `/start` shows the full command list.
+DM the bot in Telegram. `/start` shows the full command list; `/whoami`
+prints the ids the bot sees you as.
+
+### 4. Pin it to a project
+
+```
+/bind ~/Workspaces/my-repo
+```
+
+Every agent turn in this chat now runs in that cwd. Use `/binding` to see
+the current binding, `/unbind` to remove it. In a [forum topic](https://core.telegram.org/api/forum)
+the binding is scoped to that topic only.
+
+## Environment
+
+All env vars live in `.env` (loaded by Bun automatically).
+
+| Var | Required | Default | What it does |
+|---|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | yes | — | BotFather token |
+| `TELEGRAM_ALLOWED_CHATS` | yes | — | Comma-separated user ids and/or chat ids permitted to talk to the bot |
+| `OMP_DEFAULT_CWD` | no | `~/.omp-tg/` | cwd used when a chat has no `/bind`; auto-created if missing |
+| `OMP_TG_STT_MODEL` | no | `base` | whisper model: `tiny` / `base` / `small` / `medium` / `large`. Avoid `*.en` unless you only speak English. |
+| `OMP_TG_STT_LANG` | no | `en` | ISO language code, or `auto` for whisper's detector |
+| `OMP_TG_LOG_RETAIN_DAYS` | no | `30` | Delete `logs/<date>.log{.gz}` older than this |
+| `OMP_TG_LOG_COMPRESS_AFTER_DAYS` | no | `7` | gzip `logs/<date>.log` older than this |
 
 ## Production (PM2)
 

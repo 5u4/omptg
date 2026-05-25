@@ -40,6 +40,8 @@ to land in one session. Phases are loose — grab whatever feels useful.
 - forum topics: ChatRegistry keyed by `(chatId, threadId)`; per-topic cwd bindings (topic → group → default); `message_thread_id` routed on every send / edit / typing / UI prompt; General topic shares the group key for zero-migration
 - voice input via `message:voice` / `message:audio` → ffmpeg → openai-whisper (local, via `@oh-my-pi/pi-coding-agent/stt`) → `[✅ send] [❌ cancel]` keyboard, with reply-to-transcription as the edit channel. `OMP_TG_STT_MODEL` (default `base`) and `OMP_TG_STT_LANG` (default `en`) tune the engine.
 - log rotation: on boot, gzip `logs/<date>.log` older than `OMP_TG_LOG_COMPRESS_AFTER_DAYS` (default 7) and delete past `OMP_TG_LOG_RETAIN_DAYS` (default 30). Active file is always skipped. PM2's own `logs/pm2-out.log` / `pm2-err.log` are managed separately via `pm2-logrotate` — see README.
+- README quickstart: BotFather + @userinfobot walkthroughs, prerequisites (Bun / ffmpeg / uv / PM2), env-var table, `/bind` step, in-process forum topic mention. Screenshots / demo gif intentionally skipped — text alone covers what a newcomer trips on.
+
 
 
 
@@ -75,11 +77,7 @@ pointing at a yaml/json list. Each one polls independently.
 ### ~~P4.1 — log rotation~~  ✓ done (structured logs); pm2 logs via `pm2-logrotate` (see README)
 
 
-### P4.3 — README quickstart polish
-
-Current README assumes you know what a telegram bot token looks like.
-Add: link to @BotFather, screenshot of `/whoami` etc., link to a 30s
-demo gif.
+### ~~P4.3 — README quickstart polish~~  ✓ done (screenshots/gif skipped — text covers it)
 
 ---
 
