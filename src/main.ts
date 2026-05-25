@@ -8,7 +8,8 @@
  * Run: `bun run start` (loads .env via Bun).
  */
 import { Bot, GrammyError, HttpError } from "grammy";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { ChatRegistry, listStoredSessions } from "./chat.ts";
 import { ChatStore, expandHome } from "./chat-store.ts";
@@ -20,12 +21,12 @@ import { scoped, logPath } from "./logger.ts";
 const log = scoped("main");
 
 const TOKEN = required("TELEGRAM_BOT_TOKEN");
-// OMP_DEFAULT_CWD is optional. If unset we fall back to process.cwd() so
-// running `bun run start` (or pm2 with a `cwd` field) Just Works without
-// per-host env tweaks. The resolved path is logged at boot.start so the
-// effective value is never a mystery. Chat-specific bindings via /bind
-// still override this on a per-chat basis.
-const DEFAULT_CWD = resolveDir(Bun.env.OMP_DEFAULT_CWD ?? process.cwd());
+// OMP_DEFAULT_CWD is optional. Resolution order:
+//   1. env OMP_DEFAULT_CWD (must exist on disk if set)
+//   2. ~/.omp-tg/ (auto-created if missing)
+// Per-chat /bind values still override on a per-chat basis. The effective
+// path + source is logged at boot.start so it's never a mystery.
+const DEFAULT_CWD = resolveDefaultCwd();
 const ALLOWED = new Set(
 	(Bun.env.TELEGRAM_ALLOWED_CHATS ?? "")
 		.split(",")
@@ -40,6 +41,15 @@ function required(key: string): string {
 		process.exit(1);
 	}
 	return v;
+}
+
+function resolveDefaultCwd(): string {
+	const env = Bun.env.OMP_DEFAULT_CWD;
+	if (env) return resolveDir(env);
+	const fallback = resolvePath(homedir(), ".omp-tg");
+	// mkdirSync({recursive:true}) is a no-op if it already exists.
+	mkdirSync(fallback, { recursive: true });
+	return fallback;
 }
 
 function resolveDir(path: string): string {
@@ -556,7 +566,7 @@ process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
 log.info("boot.start", {
 	default_cwd: DEFAULT_CWD,
-	default_cwd_source: Bun.env.OMP_DEFAULT_CWD ? "env" : "process.cwd",
+	default_cwd_source: Bun.env.OMP_DEFAULT_CWD ? "env" : "fallback:~/.omp-tg",
 	allowed_chats: [...ALLOWED],
 	log_file: logPath(),
 });
