@@ -74,11 +74,27 @@ bot.use(async (ctx, next) => {
 	await next();
 });
 
-// Allow-list guard.
+// Auth: an update is allowed if EITHER the sender's user id OR the chat id
+// is in the allow list. This lets you talk to the bot in a group where you
+// are listed as an allowed user without having to also enumerate the group
+// id — but the bot still ignores anyone else in the same group.
 bot.use(async (ctx, next) => {
-	const id = (ctx.chat?.id ?? ctx.chatId)?.toString();
-	if (!id || (ALLOWED.size && !ALLOWED.has(id))) {
-		log.warn("auth.reject", { chat_id: id, allowed: [...ALLOWED] });
+	if (ALLOWED.size === 0) {
+		// No allowlist configured: open mode (still authenticated by token).
+		await next();
+		return;
+	}
+	const chatId = (ctx.chat?.id ?? ctx.chatId)?.toString();
+	const fromId = ctx.from?.id?.toString();
+	const ok =
+		(chatId !== undefined && ALLOWED.has(chatId)) ||
+		(fromId !== undefined && ALLOWED.has(fromId));
+	if (!ok) {
+		log.warn("auth.reject", {
+			chat_id: chatId,
+			from_id: fromId,
+			allowed: [...ALLOWED],
+		});
 		return;
 	}
 	await next();
