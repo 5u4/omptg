@@ -37,8 +37,6 @@ export async function dispatchVoiceText(
 		bot: deps.bot,
 		chat,
 		prompt: text,
-		chatId,
-		threadId,
 		replyTo,
 		source: "voice",
 	});

@@ -20,14 +20,12 @@ const log = scoped("turn");
 
 export interface TurnArgs {
 	bot: Bot;
+	/** chatId / threadId are read off this — callers used to pass them
+	 *  separately and could (and occasionally did) get them out of sync. */
 	chat: ChatSession;
 	/** Already-composed prompt text (caller wraps quote / forward / image-path
 	 *  framing). The agent receives this verbatim. */
 	prompt: string;
-	/** Telegram chat id the steered ack and error reply land in. */
-	chatId: number;
-	/** Forum topic id, if any. Spread into message_thread_id on outbound. */
-	threadId?: number;
 	/** message_id of the user's triggering message — used both as the
 	 *  reply target on the agent's first chunk and as the anchor for the
 	 *  steered/error notifications. */
@@ -43,7 +41,8 @@ export interface TurnArgs {
  * can flow through, otherwise we deadlock on our own session.
  */
 export async function runTurn(args: TurnArgs): Promise<void> {
-	const { bot, chat, prompt, chatId, threadId, replyTo, source } = args;
+	const { bot, chat, prompt, replyTo, source } = args;
+	const { chatId, threadId } = chat;
 	const topicOpts = threadId !== undefined ? { message_thread_id: threadId } : {};
 	try {
 		if (chat.isTurnActive) {

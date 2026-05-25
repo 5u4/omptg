@@ -77,8 +77,6 @@ export function installPhotoHandler(deps: Deps): void {
 				bot: deps.bot,
 				chat,
 				prompt: promptText,
-				chatId,
-				threadId,
 				replyTo,
 				source: "photo",
 			});

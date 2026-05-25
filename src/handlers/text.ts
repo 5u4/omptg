@@ -167,8 +167,6 @@ export function installTextHandler(deps: Deps): void {
 			bot: deps.bot,
 			chat,
 			prompt: promptText,
-			chatId: ctx.chat.id,
-			threadId: extractThreadId(ctx.message),
 			replyTo: ctx.message.message_id,
 			source: "text",
 		});

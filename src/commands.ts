@@ -14,16 +14,8 @@ import { scoped } from "./logger.ts";
 import { extractThreadId } from "./topic.ts";
 import { listStoredSessions } from "./chat.ts";
 import { expandHome } from "./chat-store.ts";
-import type { SessionInfo } from "@oh-my-pi/pi-coding-agent";
 
 const log = scoped("commands");
-
-/**
- * Per-chat cache of the last /sessions listing, so /resume <n> resolves
- * the 1-based index the user saw. Lives at module scope — only one
- * bot per process, and a stale cache is harmless (resume validates length).
- */
-const storedSessionsByChat = new Map<number, SessionInfo[]>();
 
 const SESSIONS_DEFAULT_LIMIT = 8;
 const SESSIONS_MAX_LIMIT = 50;
@@ -345,7 +337,7 @@ export function installCommands(deps: Deps): void {
 			await ctx.reply(`no stored sessions in ${chat.cwd}`);
 			return;
 		}
-		storedSessionsByChat.set(ctx.chat.id, sessions);
+		chat.recentSessions = sessions;
 		const lines = sessions.map((s, i) => {
 			const ts = s.modified.toISOString().slice(5, 16).replace("T", " ");
 			// Prefer the LLM-generated title; fall back to the first user
@@ -379,8 +371,10 @@ export function installCommands(deps: Deps): void {
 			targetIndex = 1;
 		} else {
 			const n = Number.parseInt(arg, 10);
-			const cached = storedSessionsByChat.get(ctx.chat.id);
-			if (!cached || !Number.isFinite(n) || n < 1 || n > cached.length) {
+			const cached = chat.recentSessions;
+			// `recentSessions` is `[]` until the first `/sessions` runs;
+			// length===0 + n>=1 falls into the same "invalid" branch.
+			if (!Number.isFinite(n) || n < 1 || n > cached.length) {
 				await ctx.reply("invalid index; run /sessions first");
 				return;
 			}

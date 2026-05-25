@@ -161,6 +161,16 @@ export class ChatSession {
 	 */
 	private pendingAssistantText: string | undefined;
 
+	/**
+	 * Cache of the last `/sessions` listing, so `/resume <n>` resolves
+	 * the 1-based index the user saw. Per-ChatSession (not per-chat-id)
+	 * so a forum group's topic A and topic B don't share the cache.
+	 *
+	 * Stale entries are harmless: `/resume` re-validates length and
+	 * re-opens by path.
+	 */
+	recentSessions: SessionInfo[] = [];
+
 	constructor(opts: ChatSessionOptions) {
 		this.chatId = opts.chatId;
 		this.threadId = opts.threadId;
