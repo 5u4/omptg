@@ -71,8 +71,17 @@ export class TelegramUI implements ExtensionUIContext {
 	constructor(
 		private readonly bot: Bot,
 		private readonly chatId: number,
+		/** Forum topic id. undefined = DM / non-forum group / General topic. */
+		private readonly threadId?: number,
 	) {
-		this.log = scoped(`ui:${chatId}`);
+		this.log = scoped(`ui:${chatId}${threadId !== undefined ? `:${threadId}` : ""}`);
+	}
+
+	/** Spread into any grammY `Other` options object to route to the right
+	 *  forum topic. Returns an empty object outside forum topics so we
+	 *  don't accidentally send `message_thread_id: undefined`. */
+	private topicOpts(): { message_thread_id?: number } {
+		return this.threadId !== undefined ? { message_thread_id: this.threadId } : {};
 	}
 
 	pending(): PendingUiRequest | undefined {
@@ -144,7 +153,7 @@ export class TelegramUI implements ExtensionUIContext {
 				"",
 				...options.map((o, i) => `${i + 1}) ${o}`),
 			].join("\n");
-			await this.bot.api.sendMessage(this.chatId, preview);
+			await this.bot.api.sendMessage(this.chatId, preview, this.topicOpts());
 		}
 
 		const keyboard: InlineKeyboardButton[][] = options.map((opt, i) => [
@@ -171,6 +180,7 @@ export class TelegramUI implements ExtensionUIContext {
 		const keyboardText = longOptions ? "👇 pick one" : `❓ ${title}`;
 		const msg = await this.bot.api.sendMessage(this.chatId, keyboardText, {
 			reply_markup: { inline_keyboard: keyboard },
+			...this.topicOpts(),
 		});
 		this.log.info("select.posted", { req_id: requestId, message_id: msg.message_id });
 		return new Promise<string | undefined>(resolve => {
@@ -211,7 +221,7 @@ export class TelegramUI implements ExtensionUIContext {
 		const msg = await this.bot.api.sendMessage(
 			this.chatId,
 			`❓ ${text}`,
-			{ reply_markup: { inline_keyboard: keyboard } },
+			{ reply_markup: { inline_keyboard: keyboard }, ...this.topicOpts() },
 		);
 		this.log.info("confirm.posted", { req_id: requestId, message_id: msg.message_id });
 		return new Promise<boolean>(resolve => {
@@ -250,6 +260,7 @@ export class TelegramUI implements ExtensionUIContext {
 						],
 					],
 				},
+				...this.topicOpts(),
 			},
 		);
 		return new Promise<string | undefined>(resolve => {

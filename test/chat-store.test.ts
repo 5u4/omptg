@@ -121,3 +121,127 @@ describe("ChatStore", () => {
 		expect(existsSync(tmp)).toBe(false);
 	});
 });
+
+describe("ChatStore — topic bindings", () => {
+	test("setTopic / getTopic round-trip, auto-fills added_at", () => {
+		const s = new ChatStore(storePath);
+		s.setTopic(1, 5, { cwd: "/y" });
+		const t = s.getTopic(1, 5);
+		expect(t?.cwd).toBe("/y");
+		expect(Number.isFinite(Date.parse(t!.added_at))).toBe(true);
+	});
+
+	test("topic binding persists across instances", () => {
+		const s1 = new ChatStore(storePath);
+		s1.setTopic(1, 5, { cwd: "/y", label: "feature" });
+		const s2 = new ChatStore(storePath);
+		expect(s2.getTopic(1, 5)?.cwd).toBe("/y");
+		expect(s2.getTopic(1, 5)?.label).toBe("feature");
+	});
+
+	test("setTopic on chat with no group binding still works", () => {
+		const s = new ChatStore(storePath);
+		s.setTopic(1, 5, { cwd: "/y" });
+		expect(s.get(1)?.cwd).toBe(""); // synthetic placeholder
+		expect(s.getTopic(1, 5)?.cwd).toBe("/y");
+	});
+
+	test("topicIds lists configured topics", () => {
+		const s = new ChatStore(storePath);
+		s.setTopic(1, 5, { cwd: "/a" });
+		s.setTopic(1, 12, { cwd: "/b" });
+		expect(s.topicIds(1).sort()).toEqual(["12", "5"]);
+	});
+
+	test("topicIds is empty when no topics configured", () => {
+		const s = new ChatStore(storePath);
+		s.set(1, { cwd: "/x" });
+		expect(s.topicIds(1)).toEqual([]);
+	});
+
+	test("deleteTopic removes the override but keeps group binding", () => {
+		const s = new ChatStore(storePath);
+		s.set(1, { cwd: "/x" });
+		s.setTopic(1, 5, { cwd: "/y" });
+		expect(s.deleteTopic(1, 5)).toBe(true);
+		expect(s.getTopic(1, 5)).toBeUndefined();
+		expect(s.get(1)?.cwd).toBe("/x");
+	});
+
+	test("deleteTopic returns false when nothing to delete", () => {
+		const s = new ChatStore(storePath);
+		expect(s.deleteTopic(1, 5)).toBe(false);
+	});
+
+	test("deleteTopic GCs the chat entry when no group binding + no remaining topics", () => {
+		const s = new ChatStore(storePath);
+		s.setTopic(1, 5, { cwd: "/y" });
+		s.deleteTopic(1, 5);
+		expect(s.get(1)).toBeUndefined();
+		expect(s.chatIds()).toEqual([]);
+	});
+
+	test("group-level delete preserves topic bindings", () => {
+		const s = new ChatStore(storePath);
+		s.set(1, { cwd: "/x" });
+		s.setTopic(1, 5, { cwd: "/y" });
+		s.delete(1);
+		// Group cwd cleared, but topic still bound.
+		expect(s.get(1)?.cwd).toBe("");
+		expect(s.getTopic(1, 5)?.cwd).toBe("/y");
+	});
+
+	test("group-level set preserves existing topics", () => {
+		const s = new ChatStore(storePath);
+		s.setTopic(1, 5, { cwd: "/y" });
+		s.set(1, { cwd: "/x", label: "proj" });
+		expect(s.get(1)?.cwd).toBe("/x");
+		expect(s.get(1)?.label).toBe("proj");
+		expect(s.getTopic(1, 5)?.cwd).toBe("/y");
+	});
+});
+
+describe("ChatStore.resolveCwd — topic > group > undefined", () => {
+	test("topic binding wins when threadId given", () => {
+		const s = new ChatStore(storePath);
+		s.set(1, { cwd: "/group" });
+		s.setTopic(1, 5, { cwd: "/topic" });
+		expect(s.resolveCwd(1, 5)).toBe("/topic");
+	});
+
+	test("falls back to group when topic has no override", () => {
+		const s = new ChatStore(storePath);
+		s.set(1, { cwd: "/group" });
+		expect(s.resolveCwd(1, 99)).toBe("/group");
+	});
+
+	test("threadId undefined uses group binding directly", () => {
+		const s = new ChatStore(storePath);
+		s.set(1, { cwd: "/group" });
+		expect(s.resolveCwd(1, undefined)).toBe("/group");
+	});
+
+	test("returns undefined when nothing bound at any level", () => {
+		const s = new ChatStore(storePath);
+		expect(s.resolveCwd(1, undefined)).toBeUndefined();
+		expect(s.resolveCwd(1, 5)).toBeUndefined();
+	});
+
+	test("topic-only binding does not satisfy threadId=undefined lookup", () => {
+		const s = new ChatStore(storePath);
+		s.setTopic(1, 5, { cwd: "/topic" });
+		// No group binding, asking about General → undefined.
+		expect(s.resolveCwd(1, undefined)).toBeUndefined();
+	});
+
+	test("blank group cwd (after group-level delete) does not count as a fallback", () => {
+		const s = new ChatStore(storePath);
+		s.set(1, { cwd: "/group" });
+		s.setTopic(1, 5, { cwd: "/topic" });
+		s.delete(1);
+		// Group cwd is now "". Topic 99 has no own binding → no fallback.
+		expect(s.resolveCwd(1, 99)).toBeUndefined();
+		// Topic 5 still has its own → wins.
+		expect(s.resolveCwd(1, 5)).toBe("/topic");
+	});
+});

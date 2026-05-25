@@ -14,6 +14,7 @@ import { resolve as resolvePath } from "node:path";
 import { ChatRegistry, listStoredSessions } from "./chat.ts";
 import { ChatStore, expandHome } from "./chat-store.ts";
 import { parseCallback } from "./ui-bridge.ts";
+import { extractThreadId } from "./topic.ts";
 import { formatReplyPrompt, formatForwardPrompt, type ReplyContext, type ForwardContext } from "./quote.ts";
 import { downloadPhotoToCache } from "./media.ts";
 import { initTheme } from "@oh-my-pi/pi-coding-agent";
@@ -155,16 +156,16 @@ bot.command("start", ctx =>
 			"",
 			"chat → cwd binding",
 			"/whoami   show this chat's id, type, and binding",
-			"/bind <path> [|label]   bind this chat to a cwd (effect: next /new)",
-			"/unbind   remove this chat's binding",
-			"/binding  show the active binding",
+			"/bind <path> [|label]   bind to a cwd — in a topic: topic-only; in General/DM: group default (effect: next /new)",
+			"/unbind   remove binding for this scope (topic or group)",
+			"/binding  show topic + group bindings",
 			"/retitle [name]  rename session, or LLM-regen if no name",
 		].join("\n"),
 	),
 );
 
 bot.command("status", async ctx => {
-	const chat = registry.get(ctx.chat.id);
+	const chat = registry.get(ctx.chat.id, extractThreadId(ctx.message));
 	const lines = [
 		`cwd: ${chat.cwd}`,
 		`session: ${chat.sessionId ?? "(not yet created)"}`,
@@ -186,7 +187,7 @@ bot.command("status", async ctx => {
 });
 
 bot.command("model", async ctx => {
-	const chat = registry.get(ctx.chat.id);
+	const chat = registry.get(ctx.chat.id, extractThreadId(ctx.message));
 	const arg = ctx.match?.trim();
 	if (arg) {
 		const model = await chat.setModelById(arg);
@@ -209,7 +210,7 @@ bot.command("model", async ctx => {
 });
 
 bot.command("compact", async ctx => {
-	const chat = registry.get(ctx.chat.id);
+	const chat = registry.get(ctx.chat.id, extractThreadId(ctx.message));
 	const instructions = ctx.match?.trim() || undefined;
 	const res = await chat.compact(instructions);
 	switch (res.status) {
@@ -240,47 +241,82 @@ bot.command("compact", async ctx => {
 });
 
 bot.command("cancel", async ctx => {
-	const chat = registry.get(ctx.chat.id);
+	const chat = registry.get(ctx.chat.id, extractThreadId(ctx.message));
 	const cancelled = await chat.abort();
 	await ctx.reply(cancelled ? "aborted" : "nothing to cancel");
 });
 
 bot.command("whoami", async ctx => {
 	const chatId = ctx.chat.id;
+	const threadId = extractThreadId(ctx.message);
 	const binding = registry.bindings.get(chatId);
+	const topicBinding = threadId !== undefined
+		? registry.bindings.getTopic(chatId, threadId)
+		: undefined;
 	const lines = [
 		`chat_id: ${chatId}`,
 		`chat_type: ${ctx.chat.type}`,
 	];
 	const title = "title" in ctx.chat ? ctx.chat.title : undefined;
 	if (title) lines.push(`chat_title: ${title}`);
+	if (threadId !== undefined) lines.push(`thread_id: ${threadId}`);
 	lines.push("");
-	if (binding) {
-		lines.push(`bound to: ${binding.cwd}`);
+	if (topicBinding) {
+		lines.push(`bound to (topic): ${topicBinding.cwd}`);
+		if (topicBinding.label) lines.push(`label: ${topicBinding.label}`);
+		lines.push(`since: ${topicBinding.added_at}`);
+	}
+	if (binding && binding.cwd) {
+		const tag = topicBinding ? "group default" : "bound to (group)";
+		lines.push(`${tag}: ${binding.cwd}`);
 		if (binding.label) lines.push(`label: ${binding.label}`);
-		lines.push(`since: ${binding.added_at}`);
-	} else {
+		if (!topicBinding) lines.push(`since: ${binding.added_at}`);
+	}
+	if (!topicBinding && !(binding && binding.cwd)) {
 		lines.push(`no binding — uses default cwd: ${DEFAULT_CWD}`);
-		lines.push(`bind with: /bind <path>`);
+		lines.push(threadId !== undefined
+			? `bind this topic: /bind <path>`
+			: `bind with: /bind <path>`);
 	}
 	await ctx.reply(lines.join("\n"));
 });
 
 bot.command("binding", async ctx => {
 	const chatId = ctx.chat.id;
+	const threadId = extractThreadId(ctx.message);
 	const binding = registry.bindings.get(chatId);
-	if (!binding) {
+	const topicBinding = threadId !== undefined
+		? registry.bindings.getTopic(chatId, threadId)
+		: undefined;
+	const hasGroup = !!(binding && binding.cwd);
+	const topicIds = registry.bindings.topicIds(chatId);
+	if (!topicBinding && !hasGroup && topicIds.length === 0) {
 		await ctx.reply(
-			`no binding for chat ${chatId}\nfalls back to default: ${DEFAULT_CWD}`,
+			`no binding for chat ${chatId}${threadId !== undefined ? ` topic ${threadId}` : ""}\nfalls back to default: ${DEFAULT_CWD}`,
 		);
 		return;
 	}
-	const lines = [
-		`chat_id: ${chatId}`,
-		`cwd: ${binding.cwd}`,
-	];
-	if (binding.label) lines.push(`label: ${binding.label}`);
-	lines.push(`added: ${binding.added_at}`);
+	const lines = [`chat_id: ${chatId}`];
+	if (threadId !== undefined) lines.push(`thread_id: ${threadId}`);
+	lines.push("");
+	if (topicBinding) {
+		lines.push(`topic ${threadId} cwd: ${topicBinding.cwd}`);
+		if (topicBinding.label) lines.push(`  label: ${topicBinding.label}`);
+		lines.push(`  added: ${topicBinding.added_at}`);
+	}
+	if (hasGroup) {
+		lines.push(`group cwd: ${binding!.cwd}`);
+		if (binding!.label) lines.push(`  label: ${binding!.label}`);
+		lines.push(`  added: ${binding!.added_at}`);
+	}
+	if (topicIds.length > 0) {
+		lines.push("", "configured topics:");
+		for (const tid of topicIds.sort((a, b) => Number(a) - Number(b))) {
+			const t = registry.bindings.getTopic(chatId, tid)!;
+			const mark = String(threadId) === tid ? " ←" : "";
+			lines.push(`  ${tid}: ${t.cwd}${mark}`);
+		}
+	}
 	await ctx.reply(lines.join("\n"));
 });
 
@@ -313,10 +349,16 @@ bot.command("bind", async ctx => {
 		await ctx.reply(`❌ not a directory: ${abs}`);
 		return;
 	}
-	registry.bindings.set(ctx.chat.id, { cwd: abs, label });
-	const chat = registry.get(ctx.chat.id);
+	const threadId = extractThreadId(ctx.message);
+	if (threadId !== undefined) {
+		registry.bindings.setTopic(ctx.chat.id, threadId, { cwd: abs, label });
+	} else {
+		registry.bindings.set(ctx.chat.id, { cwd: abs, label });
+	}
+	const chat = registry.get(ctx.chat.id, threadId);
+	const scope = threadId !== undefined ? `topic ${threadId}` : "group";
 	const lines = [
-		`✓ bound to ${abs}`,
+		`✓ bound ${scope} to ${abs}`,
 		label ? `label: ${label}` : undefined,
 		"",
 		chat.cwd === abs
@@ -324,27 +366,32 @@ bot.command("bind", async ctx => {
 			: "/new to apply (current session keeps cwd: " + chat.cwd + ")",
 	].filter(Boolean) as string[];
 	await ctx.reply(lines.join("\n"));
-	log.info("bind.set", { chat_id: ctx.chat.id, cwd: abs, label });
+	log.info("bind.set", { chat_id: ctx.chat.id, thread_id: threadId, cwd: abs, label });
 });
 
 bot.command("unbind", async ctx => {
-	const removed = registry.bindings.delete(ctx.chat.id);
+	const threadId = extractThreadId(ctx.message);
+	const removed = threadId !== undefined
+		? registry.bindings.deleteTopic(ctx.chat.id, threadId)
+		: registry.bindings.delete(ctx.chat.id);
 	if (!removed) {
 		await ctx.reply(`no binding to remove (already using default: ${DEFAULT_CWD})`);
 		return;
 	}
+	const scope = threadId !== undefined ? `topic ${threadId}` : "group";
 	await ctx.reply(
 		[
-			`✓ unbound — default cwd will be used on next /new: ${DEFAULT_CWD}`,
+			`✓ unbound ${scope} — fallback applies on next /new`,
 			`(current session keeps its cwd)`,
 		].join("\n"),
 	);
-	log.info("bind.removed", { chat_id: ctx.chat.id });
+	log.info("bind.removed", { chat_id: ctx.chat.id, thread_id: threadId });
 });
 
 bot.command("new", async ctx => {
-	const chat = registry.get(ctx.chat.id);
-	const desiredCwd = registry.cwdFor(ctx.chat.id);
+	const threadId = extractThreadId(ctx.message);
+	const chat = registry.get(ctx.chat.id, threadId);
+	const desiredCwd = registry.cwdFor(ctx.chat.id, threadId);
 	if (chat.isStreaming) {
 		await chat.abort();
 	}
@@ -363,7 +410,7 @@ const SESSIONS_DEFAULT_LIMIT = 8;
 const SESSIONS_MAX_LIMIT = 50;
 
 bot.command("sessions", async ctx => {
-	const chat = registry.get(ctx.chat.id);
+	const chat = registry.get(ctx.chat.id, extractThreadId(ctx.message));
 	const arg = ctx.match?.trim();
 	let limit = SESSIONS_DEFAULT_LIMIT;
 	if (arg) {
@@ -405,7 +452,7 @@ const storedSessionsByChat = new Map<
 
 bot.command("resume", async ctx => {
 	const arg = ctx.match?.trim();
-	const chat = registry.get(ctx.chat.id);
+	const chat = registry.get(ctx.chat.id, extractThreadId(ctx.message));
 	let targetPath: string;
 	let targetIndex: number;
 	if (!arg) {
@@ -440,7 +487,7 @@ bot.command("resume", async ctx => {
 });
 
 bot.command("retitle", async ctx => {
-	const chat = registry.get(ctx.chat.id);
+	const chat = registry.get(ctx.chat.id, extractThreadId(ctx.message));
 	if (!chat.hasSession) {
 		await ctx.reply("no active session — send a message or /new first");
 		return;
@@ -483,7 +530,8 @@ bot.on("callback_query:data", async ctx => {
 		await ctx.answerCallbackQuery("no chat context");
 		return;
 	}
-	const chat = registry.get(chatId);
+	const threadId = extractThreadId(ctx.callbackQuery.message);
+	const chat = registry.get(chatId, threadId);
 	const pending = chat.pendingUi();
 	log.info("callback.resolve_attempt", {
 		chat_id: chatId,
@@ -541,7 +589,7 @@ bot.on("message:photo", async ctx => {
 	const largest = photos[photos.length - 1];
 	if (!largest) return; // telegram always sends ≥1, defensive
 	const caption = ctx.message.caption?.trim() ?? "";
-	const chat = registry.get(ctx.chat.id);
+	const chat = registry.get(ctx.chat.id, extractThreadId(ctx.message));
 	const replyTo = ctx.message.message_id;
 
 	void (async () => {
@@ -668,7 +716,7 @@ bot.on("message:text", async ctx => {
 		return;
 	}
 
-	const chat = registry.get(ctx.chat.id);
+	const chat = registry.get(ctx.chat.id, extractThreadId(ctx.message));
 
 	// If a UI prompt is awaiting a text reply, route this message there.
 	const pending = chat.pendingUi();
@@ -791,9 +839,9 @@ const SLASH_COMMANDS = [
 	{ command: "model",    description: "Switch model — no arg opens picker" },
 	{ command: "compact",  description: "Manually compact session context" },
 	{ command: "whoami",   description: "Show this chat's id + binding" },
-	{ command: "bind",     description: "/bind <path> — pin this chat to a cwd" },
-	{ command: "unbind",   description: "Remove this chat's binding" },
-	{ command: "binding",  description: "Show the active binding" },
+	{ command: "bind",     description: "/bind <path> — pin chat or topic to a cwd" },
+	{ command: "unbind",   description: "Remove binding for this scope" },
+	{ command: "binding",  description: "Show topic + group bindings" },
 	{ command: "retitle",  description: "/retitle [name] — rename current session, or regen via LLM if no name" },
 	{ command: "start",    description: "Show help" },
 ] as const;

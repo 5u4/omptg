@@ -31,6 +31,10 @@ export interface ChatSessionOptions {
 	chatId: number;
 	cwd: string;
 	bot: Bot;
+	/** Forum topic id this session is scoped to. undefined = DM / non-forum
+	 *  group / forum General topic. Drives both ChatRegistry keying and
+	 *  outbound message routing (sendMessage / sendChatAction). */
+	threadId?: number;
 }
 
 /**
@@ -119,6 +123,7 @@ function extractFirstUserText(messages: readonly unknown[]): string | undefined 
 
 export class ChatSession {
 	readonly chatId: number;
+	readonly threadId: number | undefined;
 	cwd: string;
 	private readonly bot: Bot;
 	private session: AgentSession | undefined;
@@ -149,11 +154,13 @@ export class ChatSession {
 
 	constructor(opts: ChatSessionOptions) {
 		this.chatId = opts.chatId;
+		this.threadId = opts.threadId;
 		this.cwd = opts.cwd;
 		this.bot = opts.bot;
-		this.ui = new TelegramUI(opts.bot, opts.chatId);
-		this.typing = new TypingIndicator(opts.bot, opts.chatId);
-		this.log = scoped(`chat:${opts.chatId}`);
+		this.ui = new TelegramUI(opts.bot, opts.chatId, opts.threadId);
+		this.typing = new TypingIndicator(opts.bot, opts.chatId, opts.threadId);
+		const suffix = opts.threadId !== undefined ? `:${opts.threadId}` : "";
+		this.log = scoped(`chat:${opts.chatId}${suffix}`);
 	}
 
 	get hasSession(): boolean {
@@ -330,7 +337,7 @@ export class ChatSession {
 	): Promise<TelegramStreamer> {
 		const s = await this.ensure();
 		if (this.firstUserText === undefined) this.firstUserText = text;
-		this.streamer = new TelegramStreamer(this.bot, this.chatId, opts?.replyTo);
+		this.streamer = new TelegramStreamer(this.bot, this.chatId, opts?.replyTo, this.threadId);
 		this.typing.start();
 		if (s.isStreaming) {
 			await s.steer(text, opts?.images);
@@ -606,7 +613,10 @@ export class ChatSession {
 }
 
 export class ChatRegistry {
-	private readonly chats = new Map<number, ChatSession>();
+	/** Key: `${chatId}:${threadId ?? ""}`. Empty thread segment for DMs /
+	 *  non-forum groups / forum General — same key as before forum
+	 *  support, so non-forum behavior is unchanged. */
+	private readonly chats = new Map<string, ChatSession>();
 
 	constructor(
 		private readonly bot: Bot,
@@ -619,20 +629,26 @@ export class ChatRegistry {
 		return this.store;
 	}
 
-	/** Resolve cwd for a chat: stored binding if present, else default. */
-	cwdFor(chatId: number): string {
-		return this.store.get(chatId)?.cwd ?? this.defaultCwd;
+	/** Three-level resolution: topic binding → group binding → defaultCwd. */
+	cwdFor(chatId: number, threadId?: number): string {
+		return this.store.resolveCwd(chatId, threadId) ?? this.defaultCwd;
 	}
 
-	get(chatId: number): ChatSession {
-		let chat = this.chats.get(chatId);
+	private key(chatId: number, threadId?: number): string {
+		return `${chatId}:${threadId ?? ""}`;
+	}
+
+	get(chatId: number, threadId?: number): ChatSession {
+		const k = this.key(chatId, threadId);
+		let chat = this.chats.get(k);
 		if (!chat) {
 			chat = new ChatSession({
 				chatId,
-				cwd: this.cwdFor(chatId),
+				threadId,
+				cwd: this.cwdFor(chatId, threadId),
 				bot: this.bot,
 			});
-			this.chats.set(chatId, chat);
+			this.chats.set(k, chat);
 		}
 		return chat;
 	}

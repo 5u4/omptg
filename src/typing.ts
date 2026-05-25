@@ -20,6 +20,9 @@ export class TypingIndicator {
 	constructor(
 		private readonly bot: Bot,
 		private readonly chatId: number,
+		/** Forum topic id (`message_thread_id`). undefined for DMs, non-forum
+		 *  groups, and the forum "General" topic. */
+		private readonly threadId?: number,
 	) {}
 
 	start(): void {
@@ -42,7 +45,13 @@ export class TypingIndicator {
 		if (!this.running) return;
 		try {
 			await Promise.race([
-				this.bot.api.sendChatAction(this.chatId, "typing"),
+				this.bot.api.sendChatAction(
+					this.chatId,
+					"typing",
+					this.threadId !== undefined
+						? { message_thread_id: this.threadId }
+						: undefined,
+				),
 				new Promise<void>((_, rej) =>
 					setTimeout(
 						() => rej(new Error("sendChatAction timeout")),

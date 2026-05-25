@@ -48,7 +48,16 @@ export class TelegramStreamer {
 		 *  assistant chunk replies to this so the user can see what their
 		 *  turn produced. undefined for synthetic turns (smokes). */
 		private readonly replyTo?: number,
+		/** Forum topic id (`message_thread_id`). undefined = DM / non-forum
+		 *  group / forum General topic. */
+		private readonly threadId?: number,
 	) {}
+
+	/** Spread into a grammY `Other` options object to route to the topic
+	 *  this streamer was created for. Empty object outside forum topics. */
+	private topicOpts(): { message_thread_id?: number } {
+		return this.threadId !== undefined ? { message_thread_id: this.threadId } : {};
+	}
 
 	/**
 	 * Commit a finalized assistant text block. Converts source markdown to
@@ -77,6 +86,7 @@ export class TelegramStreamer {
 		try {
 			const sent = await this.bot.api.sendMessage(this.chatId, line, {
 				disable_notification: true,
+				...this.topicOpts(),
 			});
 			this.toolMsgs.set(toolCallId, {
 				messageId: sent.message_id,
@@ -162,6 +172,7 @@ export class TelegramStreamer {
 				...(opts?.replyTo !== undefined && {
 					reply_parameters: { message_id: opts.replyTo },
 				}),
+				...this.topicOpts(),
 			});
 		} catch (err) {
 			console.warn("[send] failed:", errMsg(err));
@@ -183,6 +194,7 @@ export class TelegramStreamer {
 				...(replyTo !== undefined && {
 					reply_parameters: { message_id: replyTo },
 				}),
+				...this.topicOpts(),
 			});
 		} catch (err) {
 			const m = errMsg(err);
