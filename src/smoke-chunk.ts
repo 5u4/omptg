@@ -8,7 +8,7 @@
 import type { Bot } from "grammy";
 import { splitForTelegram, TelegramStreamer } from "./streamer.ts";
 
-interface SendCall { messageId: number; text: string }
+interface SendCall { messageId: number; text: string; silent: boolean }
 interface EditCall { messageId: number; text: string }
 interface DeleteCall { messageId: number }
 
@@ -23,12 +23,12 @@ function makeFakeBot(): {
 	const deletes: DeleteCall[] = [];
 	let nextId = 1000;
 	const api = {
-		sendMessage(_chatId: number, text: string) {
+		sendMessage(_chatId: number, text: string, opts?: { disable_notification?: boolean }) {
 			if (text.length > 4096) {
 				throw new Error(`sendMessage would overflow: ${text.length} chars`);
 			}
 			const message_id = ++nextId;
-			sends.push({ messageId: message_id, text });
+			sends.push({ messageId: message_id, text, silent: opts?.disable_notification === true });
 			return Promise.resolve({ message_id });
 		},
 		editMessageText(_chatId: number, messageId: number, text: string) {
@@ -174,6 +174,24 @@ async function main() {
 		assert(sends[1]!.text === "💭 short note", "short preamble verbatim");
 		assert(sends[2]!.text === "(no response)", "preamble alone shouldn't satisfy committedAny");
 		console.log("✓ preamble truncates + does not satisfy committedAny");
+	}
+
+	// --- Case 9: chrome is silent, assistant reply notifies. ---
+	{
+		const { bot, sends } = makeFakeBot();
+		const streamer = new TelegramStreamer(bot, 1);
+		await streamer.toolStart("c1", "📖 read x");
+		await streamer.toolEnd("c1", false, undefined);
+		await streamer.commitPreamble("about to do thing");
+		await streamer.notice("🔄 retry 1/3");
+		await streamer.commitAssistant("here is the real reply");
+		await streamer.finalize();
+		const find = (text: string) => sends.find(s => s.text === text);
+		assert(find("📖 read x")?.silent === true, "tool start must be silent");
+		assert(find("💭 about to do thing")?.silent === true, "preamble must be silent");
+		assert(find("🔄 retry 1/3")?.silent === true, "notice must be silent");
+		assert(find("here is the real reply")?.silent === false, "assistant reply must NOT be silent");
+		console.log("✓ chrome silent, assistant reply notifies");
 	}
 }
 

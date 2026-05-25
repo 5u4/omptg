@@ -60,7 +60,9 @@ export class TelegramStreamer {
 		// Defensive: if we somehow see the same id twice, replace the old entry
 		// (the prior message stays in chat but is no longer tracked).
 		try {
-			const sent = await this.bot.api.sendMessage(this.chatId, line);
+			const sent = await this.bot.api.sendMessage(this.chatId, line, {
+				disable_notification: true,
+			});
 			this.toolMsgs.set(toolCallId, {
 				messageId: sent.message_id,
 				startLine: line,
@@ -92,12 +94,14 @@ export class TelegramStreamer {
 				console.warn("[tool-end] edit failed:", msg);
 			}
 		}
+		// Note: editMessageText doesn't carry disable_notification; the
+		// original send was silent and editing it doesn't re-notify.
 	}
 
 	/** One-shot informational line (retries, notices). Posted as its own msg. */
 	async notice(line: string): Promise<void> {
 		if (this.finalized || !line) return;
-		await this.send(line);
+		await this.send(line, { silent: true });
 	}
 
 	/**
@@ -113,7 +117,7 @@ export class TelegramStreamer {
 		const line = trimmed.length > PREAMBLE_LEN
 			? `💭 ${trimmed.slice(0, PREAMBLE_LEN).trimEnd()}…`
 			: `💭 ${trimmed}`;
-		await this.send(line);
+		await this.send(line, { silent: true });
 		// Preambles don't count toward "did we say anything"; the real
 		// reply at agent_end is what satisfies the (no response) guard.
 	}
@@ -136,9 +140,11 @@ export class TelegramStreamer {
 		await this.send(text);
 	}
 
-	private async send(text: string): Promise<void> {
+	private async send(text: string, opts?: { silent?: boolean }): Promise<void> {
 		try {
-			await this.bot.api.sendMessage(this.chatId, text);
+			await this.bot.api.sendMessage(this.chatId, text, {
+				disable_notification: opts?.silent ?? false,
+			});
 		} catch (err) {
 			console.warn("[send] failed:", errMsg(err));
 		}
