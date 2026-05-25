@@ -470,23 +470,38 @@ log.info("boot.theme_ready");
 // Register slash commands with Telegram so they show up in the chat
 // autocomplete and the menu button. Best-effort: a network blip here is
 // not fatal — the bot can still receive /commands without registration.
-try {
-	await bot.api.setMyCommands([
-		{ command: "new",      description: "Start a fresh session in the current cwd" },
-		{ command: "sessions", description: "List recent stored sessions (default 8)" },
-		{ command: "resume",   description: "Reopen session by index from /sessions" },
-		{ command: "cancel",   description: "Abort the current turn (keeps session)" },
-		{ command: "status",   description: "Show session id, model, cwd" },
-		{ command: "whoami",   description: "Show this chat's id + binding" },
-		{ command: "bind",     description: "/bind <path> — pin this chat to a cwd" },
-		{ command: "unbind",   description: "Remove this chat's binding" },
-		{ command: "binding",  description: "Show the active binding" },
-		{ command: "start",    description: "Show help" },
-	]);
-	log.info("boot.commands_registered");
-} catch (err) {
-	log.warn("boot.commands_register_failed", { err: String(err) });
+// Register slash commands. Telegram scopes the command menu separately
+// per surface: the default scope only covers private chats, so groups
+// won't see autocomplete unless we also push to all_group_chats (and
+// all_chat_administrators so admin-only groups still see them).
+const SLASH_COMMANDS = [
+	{ command: "new",      description: "Start a fresh session in the current cwd" },
+	{ command: "sessions", description: "List recent stored sessions (default 8)" },
+	{ command: "resume",   description: "Reopen session by index from /sessions" },
+	{ command: "cancel",   description: "Abort the current turn (keeps session)" },
+	{ command: "status",   description: "Show session id, model, cwd" },
+	{ command: "whoami",   description: "Show this chat's id + binding" },
+	{ command: "bind",     description: "/bind <path> — pin this chat to a cwd" },
+	{ command: "unbind",   description: "Remove this chat's binding" },
+	{ command: "binding",  description: "Show the active binding" },
+	{ command: "start",    description: "Show help" },
+] as const;
+const COMMAND_SCOPES = [
+	{ type: "default" },
+	{ type: "all_private_chats" },
+	{ type: "all_group_chats" },
+	{ type: "all_chat_administrators" },
+] as const;
+const registered: Array<{ scope: string; ok: boolean; err?: string }> = [];
+for (const scope of COMMAND_SCOPES) {
+	try {
+		await bot.api.setMyCommands([...SLASH_COMMANDS], { scope });
+		registered.push({ scope: scope.type, ok: true });
+	} catch (err) {
+		registered.push({ scope: scope.type, ok: false, err: String(err) });
+	}
 }
+log.info("boot.commands_registered", { results: registered });
 
 // Telegram caches the LAST allowed_updates value per bot token. If a
 // previous run (or any other client using this token) called getUpdates
