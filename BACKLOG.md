@@ -37,6 +37,8 @@ to land in one session. Phases are loose — grab whatever feels useful.
 - `/compact [instructions]` manually compacts context (refuses while streaming; auto-compaction handles in-flight overflow)
 - `/resume` with no arg defaults to most recent session in cwd (independent of /sessions cache)
 - bun:test coverage for `tool-render`, `chat-store`, `ui-bridge` (parseCallback + resolve matrix) — run with `bun test test/`
+- forum topics: ChatRegistry keyed by `(chatId, threadId)`; per-topic cwd bindings (topic → group → default); `message_thread_id` routed on every send / edit / typing / UI prompt; General topic shares the group key for zero-migration
+
 ---
 
 
@@ -60,25 +62,23 @@ Look at `omp-tg-bridge` for prior art if helpful.
 
 ## Priority 3 — bigger features (you originally wanted)
 
-### P3.1 — Forum topics: one topic per session
+### P3.1 — Topic auto-bind to cwd
 
-Original requirement: a Telegram **forum group** where each topic
-auto-creates a fresh session, optionally bound to its own cwd. Today
-ChatRegistry is keyed by `chatId` alone.
+Forum topics already get their own session + per-topic `/bind` (see
+"Done so far"). Open question: when a brand-new topic is created,
+should it auto-bind to a cwd instead of requiring an explicit `/bind`
+in that topic?
 
-**Approach**:
-- key by `(chatId, thread_id)` instead of `chatId`
-- detect forum topics via `message.message_thread_id` and
-  `message.is_topic_message`
-- when topic is created, auto-bind to a cwd (config? or first
-  `/bind` in that topic?)
-- pass `message_thread_id` on every `sendMessage` / `editMessageText`
-  in that thread
+**Options**:
+- config file mapping `topic_name_regex → cwd`
+- inherit the group binding until first `/bind` (current behavior —
+  may already be enough)
+- a `/bind` issued in General sets the default for new topics in
+  that forum
 
-Larger change (~100 lines + tests). Worth a proper plan before coding.
-
-**References**: FreakySurgeon's `omp-tg-bridge/src/omp_telegram/topic.py`
-(same idea, different runner).
+Probably wait until the current behavior actually hurts before
+designing this. **References**: FreakySurgeon's
+`omp-tg-bridge/src/omp_telegram/topic.py`.
 
 ### P3.2 — Multi-bot from one process
 
