@@ -313,6 +313,19 @@ export class ChatSession {
 			}
 			this.session = undefined;
 		}
+		// Drain any in-flight tool edits / final assistant chunk that
+		// handleEvent scheduled before we unsubscribed. finalize() awaits
+		// the chain tail and is idempotent — safe if endTurn already ran.
+		// Doing this BEFORE clearing `streamer` ensures the chain settles
+		// against the live instance; otherwise a stray `[send] failed:`
+		// log shows up on shutdown after `bot.stop()` invalidates the api.
+		if (this.streamer) {
+			try {
+				await this.streamer.finalize();
+			} catch (err) {
+				this.log.warn("dispose.streamer_finalize_failed", { err: String(err) });
+			}
+		}
 		this.streamer = undefined;
 		this.firstUserText = undefined;
 		this.pendingAssistantText = undefined;
