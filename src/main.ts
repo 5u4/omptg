@@ -546,6 +546,14 @@ bot.on("message:text", async ctx => {
 	// the chat asynchronously so we don't lose them.
 	void (async () => {
 		try {
+			// If a turn is already running, sending another message routes
+			// through session.steer() (LLM sees it mid-turn). Ack so the
+			// user knows it landed — silent push, with the escape hatch.
+			if (chat.isStreaming) {
+				await ctx.reply("↪ steered (/cancel to abort)", {
+					disable_notification: true,
+				});
+			}
 			// Wrap order: forward first (the message itself is the quoted
 			// thing), then reply (annotates relationship to a prior message).
 			// If both are set on the same telegram message the user replied
