@@ -384,12 +384,15 @@ export class ChatSession {
 		this.typing.stop();
 		this.turnActive = false;
 		// Belt + suspenders: if agent_end never fired (crash, abort, etc.)
-		// the pending assistant text would otherwise be lost. Flush it here
-		// as the final reply so the user still sees something.
+		// the pending assistant text would otherwise be lost. Flush it via
+		// the same chain so order is preserved relative to any tool events
+		// still queued. `finalize()` then awaits the chain tail before
+		// flipping `finalized` and clearing `toolMsgs`.
 		const final = this.pendingAssistantText;
 		this.pendingAssistantText = undefined;
-		if (this.streamer && final) await this.streamer.commitAssistant(final);
-		await this.streamer?.finalize();
+		const s = this.streamer;
+		if (s && final) s.enqueue(() => s.commitAssistant(final));
+		await s?.finalize();
 	}
 
 	/** Forward UI pending-request resolution from callback or text reply. */
@@ -431,11 +434,13 @@ export class ChatSession {
 				this.pendingAssistantText = undefined;
 				const line = renderToolStart(ev.toolName, ev.args);
 				const id = ev.toolCallId;
-				// Serialize preamble→tool so order is deterministic in chat.
-				void (async () => {
+				// Serialize preamble→tool so order is deterministic in chat,
+				// AND so endTurn's finalize() drains them before clearing
+				// toolMsgs / flipping `finalized`.
+				s.enqueue(async () => {
 					if (pre) await s.commitPreamble(pre);
 					await s.toolStart(id, line);
-				})();
+				});
 				break;
 			}
 			case "tool_execution_end": {
@@ -450,7 +455,8 @@ export class ChatSession {
 				const errorLine = isError
 					? renderToolEnd(ev.toolName, ev.result, true) || undefined
 					: undefined;
-				void s.toolEnd(ev.toolCallId, isError, errorLine);
+				const toolCallId = ev.toolCallId;
+				s.enqueue(() => s.toolEnd(toolCallId, isError, errorLine));
 				break;
 			}
 			case "notice": {
@@ -460,7 +466,7 @@ export class ChatSession {
 			}
 			case "auto_retry_start": {
 				const ev = event as { attempt: number; maxAttempts: number };
-				void s?.notice(`🔄 retry ${ev.attempt}/${ev.maxAttempts}`);
+				s?.enqueue(() => s.notice(`🔄 retry ${ev.attempt}/${ev.maxAttempts}`));
 				break;
 			}
 			case "agent_end": {
@@ -469,7 +475,7 @@ export class ChatSession {
 				// Whatever's still pending is the final assistant reply.
 				const final = this.pendingAssistantText;
 				this.pendingAssistantText = undefined;
-				if (s && final) void s.commitAssistant(final);
+				if (s && final) s.enqueue(() => s.commitAssistant(final));
 				this.maybeGenerateTitle();
 				break;
 			}

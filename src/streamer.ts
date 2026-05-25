@@ -40,6 +40,21 @@ export class TelegramStreamer {
 	private readonly toolMsgs = new Map<string, { messageId: number; startLine: string }>();
 	private finalized = false;
 	private readonly log = scoped("streamer");
+	/**
+	 * Serialization chain for fire-and-forget commits dispatched from
+	 * `ChatSession.handleEvent` (which is a sync subscriber and can't
+	 * await). `agent_end` fires `commitAssistant`, `tool_execution_end`
+	 * fires `toolEnd`, `tool_execution_start` fires `commitPreamble +
+	 * toolStart` — all enter the chain via `enqueue()`. `finalize()`
+	 * awaits the tail so the last assistant chunk and any pending tool
+	 * edits land before we set `finalized = true` and clear `toolMsgs`.
+	 *
+	 * Without this, `finally { await endTurn() }` in runTurn would race
+	 * the `void commitAssistant(...)` scheduled by `agent_end`: finalize
+	 * could flip the flag before the first chunk was even sent, swallowing
+	 * the whole reply.
+	 */
+	private tail: Promise<void> = Promise.resolve();
 
 	constructor(
 		private readonly bot: Bot,
@@ -57,6 +72,22 @@ export class TelegramStreamer {
 	 *  this streamer was created for. Empty object outside forum topics. */
 	private topicOpts(): { message_thread_id?: number } {
 		return this.threadId !== undefined ? { message_thread_id: this.threadId } : {};
+	}
+
+	/**
+	 * Append a fire-and-forget commit to the serialization chain. Returned
+	 * Promise rejects only when `task` itself throws — callers (and the
+	 * tail) swallow errors so one bad commit doesn't poison the chain.
+	 *
+	 * Tasks run sequentially in submission order: a `commitAssistant`
+	 * enqueued by `agent_end` waits behind any prior `toolStart` /
+	 * `toolEnd` already in flight, and `finalize()` won't return until
+	 * every queued task has settled.
+	 */
+	enqueue(task: () => Promise<void>): void {
+		this.tail = this.tail.then(task).catch(err => {
+			this.log.warn("enqueue.task_failed", { err: errMsg(err) });
+		});
 	}
 
 	/**
@@ -149,6 +180,16 @@ export class TelegramStreamer {
 
 	async finalize(): Promise<void> {
 		if (this.finalized) return;
+		// Drain anything still queued (e.g. the assistant reply scheduled
+		// by agent_end) BEFORE we flip `finalized` and clear `toolMsgs`.
+		// Otherwise the void task started by handleEvent would no-op or
+		// fail to find its tool entry.
+		try {
+			await this.tail;
+		} catch {
+			// Tail's own catch already logged; swallow here so finalize is
+			// truly idempotent and safe in a shutdown path.
+		}
 		this.finalized = true;
 		// Anything still "in-flight" at finalize had no end event — leave the
 		// start message as-is rather than guessing a result icon. We also do
