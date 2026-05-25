@@ -246,7 +246,15 @@ export class TelegramStreamer {
 				md_len: chunk.md.length,
 				md_head: chunk.md.slice(0, 200),
 			});
-			await this.send(chunk.src, { replyTo });
+			// `chunk.md` fit the 4096-char budget, but `chunk.src` (raw
+			// markdown) can be longer than its MarkdownV2 conversion —
+			// telegramify shortens some sequences (e.g. `**x**` → `*x*`).
+			// Re-chunk the plain-text fallback so a single send doesn't
+			// silently exceed the cap and lose the message.
+			const parts = splitForTelegram(chunk.src);
+			for (let i = 0; i < parts.length; i++) {
+				await this.send(parts[i]!, i === 0 ? { replyTo } : undefined);
+			}
 		}
 	}
 }
