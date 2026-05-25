@@ -21,6 +21,7 @@
  */
 import type { Bot } from "grammy";
 import { splitMarkdownForTelegram } from "./markdown.ts";
+import { scoped } from "./logger.ts";
 
 const MAX_MESSAGE_LEN = 4096;
 /** Truncation budget for mid-turn assistant preambles (one-line heartbeat). */
@@ -38,6 +39,7 @@ export class TelegramStreamer {
 	/** message_id of the in-flight tool status, keyed by toolCallId. */
 	private readonly toolMsgs = new Map<string, { messageId: number; startLine: string }>();
 	private finalized = false;
+	private readonly log = scoped("streamer");
 
 	constructor(
 		private readonly bot: Bot,
@@ -184,7 +186,13 @@ export class TelegramStreamer {
 			});
 		} catch (err) {
 			const m = errMsg(err);
-			console.warn("[md-send] failed, falling back to source plain:", m);
+			this.log.warn("md.fallback_plain", {
+				chat_id: this.chatId,
+				err: m,
+				src_len: chunk.src.length,
+				md_len: chunk.md.length,
+				md_head: chunk.md.slice(0, 200),
+			});
 			await this.send(chunk.src, { replyTo });
 		}
 	}
