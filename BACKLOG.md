@@ -26,6 +26,7 @@ to land in one session. Phases are loose — grab whatever feels useful.
 - slash commands registered across 4 scopes; chat-scope overrides wiped on boot
 - unknown command reply
 - PM2 supervision + `ecosystem.config.cjs`
+- chunked streaming past 4096-char telegram limit (seals prior msg, opens new one)
 
 ---
 
@@ -51,16 +52,6 @@ boundaries before flushing. Falling back to plain text on parse error is OK.
 
 **Files**: `src/streamer.ts` (add `parse_mode` + escape), maybe new
 `src/markdown.ts` for the escaper. Smoke: `smoke-markdown.ts`.
-
-### P1.2 — Long replies overflow telegram's 4096-char limit
-
-Right now a single `editMessageText` past 4096 chars throws `MESSAGE_TOO_LONG`
-and the whole reply gets lost. Need to chunk: keep editing the current
-message up to ~4000 chars, then `sendMessage` a new one and continue
-editing that.
-
-**Files**: `src/streamer.ts`. Smoke: trigger via prompt
-"Write a 200-line poem about debugging".
 
 ### P1.3 — Image input from telegram
 
@@ -190,7 +181,12 @@ demo gif.
 ## Discoveries during dogfood (fill in as you hit them)
 
 <!-- pickup-here -->
-- (none yet)
+- P1.2 chunking: reserved 196 chars of headroom for the status tail so the
+  tool-render line doesn't push the active message past 4096 mid-flush.
+  Split prefers the last newline within budget but requires it to be ≥ half
+  the budget to avoid stalling on a long line with one early newline.
+  Status tail is cleared in finalize() so the last sealed message renders
+  clean body only. Smoke: `bun run src/smoke-chunk.ts`.
 
 ---
 
