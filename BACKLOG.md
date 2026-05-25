@@ -32,26 +32,17 @@ to land in one session. Phases are loose — grab whatever feels useful.
 - MarkdownV2 rendering for assistant replies (telegramify-markdown + fence-safe split)
 - `/retitle [name]` — rename session or LLM-regen via title-generator
 - image input via `message:photo` → base64 + ImageContent → session.prompt
+- `/status` shows session title + context window % (tokens/window)
+- `/model [id]` switches model — picker via TelegramUI.select or by id, `setModelTemporary` (does NOT persist to global settings)
+- `/compact [instructions]` manually compacts context (refuses while streaming; auto-compaction handles in-flight overflow)
+- `/resume` with no arg defaults to most recent session in cwd (independent of /sessions cache)
+- bun:test coverage for `tool-render`, `chat-store`, `ui-bridge` (parseCallback + resolve matrix) — run with `bun test test/`
 ---
 
 
 
 ## Priority 2 — capability gaps
 
-### P2.1 — `/model` to switch models
-
-`AgentSession.modelRegistry.getAvailable()` returns the list. Use
-`session.setModel(model)` (verify name in agent-session.d.ts). UI: same
-TelegramUI.select pattern we already use.
-
-**Files**: `src/main.ts`. Register in `SLASH_COMMANDS`.
-
-### P2.2 — `/compact` to compact current session context
-
-OMP has `session.runIdleCompaction()` (or similar — check
-`agent-session.d.ts`). Useful before context runs out on long sessions.
-
-**Files**: `src/main.ts`. Register in `SLASH_COMMANDS`.
 
 
 ### P2.4 — Voice input (whisper)
@@ -122,14 +113,6 @@ pm2 set pm2-logrotate:retain 14
 Document in README. Our own structured log: add a `compress + delete files
 older than N days` pass on boot, or run via cron.
 
-### P4.2 — Real unit tests
-
-Right now we only have `smoke-*.ts` (integration). Bun has a built-in
-`bun:test`. Worth covering:
-- `tool-render.ts` (already pseudo-tested in smoke, formalize)
-- `chat-store.ts` (atomic write, reload across instances)
-- `ui-bridge.ts` `resolve()` matrix
-- `parseCallback` round-trip
 
 ### P4.3 — README quickstart polish
 
