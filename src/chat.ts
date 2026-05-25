@@ -243,24 +243,25 @@ export class ChatSession {
 				break;
 			}
 			case "tool_execution_start": {
-				const ev = event as { toolName?: string; args?: unknown };
-				if (ev.toolName) {
-					void s?.setStatus(renderToolStart(ev.toolName, ev.args));
+				const ev = event as { toolCallId?: string; toolName?: string; args?: unknown };
+				if (s && ev.toolCallId && ev.toolName) {
+					void s.toolStart(ev.toolCallId, renderToolStart(ev.toolName, ev.args));
 				}
 				break;
 			}
 			case "tool_execution_end": {
 				const ev = event as {
+					toolCallId?: string;
 					toolName?: string;
 					result?: unknown;
 					isError?: boolean;
 				};
-				if (ev.toolName && ev.isError) {
-					const line = renderToolEnd(ev.toolName, ev.result, ev.isError);
-					if (line) void s?.setStatus(line);
-				} else {
-					void s?.setStatus("");
-				}
+				if (!s || !ev.toolCallId || !ev.toolName) break;
+				const isError = ev.isError === true;
+				const errorLine = isError
+					? renderToolEnd(ev.toolName, ev.result, true) || undefined
+					: undefined;
+				void s.toolEnd(ev.toolCallId, isError, errorLine);
 				break;
 			}
 			case "notice": {
@@ -270,7 +271,7 @@ export class ChatSession {
 			}
 			case "auto_retry_start": {
 				const ev = event as { attempt: number; maxAttempts: number };
-				void s?.setStatus(`🔄 retry ${ev.attempt}/${ev.maxAttempts}`);
+				void s?.notice(`🔄 retry ${ev.attempt}/${ev.maxAttempts}`);
 				break;
 			}
 			case "agent_end": {

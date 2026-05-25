@@ -1,24 +1,38 @@
 /**
  * Render an agent turn into telegram messages.
  *
- * Old behaviour streamed every text_delta into a single growing message,
- * which surfaced a lot of mid-turn reasoning prose to the chat. We now
- * commit assistant text only when a message finishes (`message_end` in
- * `chat.ts`) and keep an ephemeral one-line status message that ticks
- * with the active tool. The status message is deleted at finalize so the
- * persistent chat history is just user prompts → final replies.
+ * Design choices (kept here so future-you doesn't have to spelunk git):
+ * - Assistant text is committed once at `message_end` (chat.ts) and posted
+ *   as one or more sendMessage calls. We don't stream token-by-token —
+ *   the resulting mid-turn reasoning prose was noisy in telegram.
+ * - Each tool invocation gets its OWN persistent message: send the
+ *   `📖 read foo.ts` line at `tool_execution_start`, then edit that same
+ *   message id to `✅ read foo.ts` (or `❌ … : <detail>`) on
+ *   `tool_execution_end`. Concurrent tools are matched by `toolCallId`.
+ * - Transient notices (auto_retry, etc.) are posted as their own
+ *   sendMessage so they also live in the history.
+ * - finalize() never deletes messages. The only thing it ensures is that
+ *   a turn with zero assistant text still emits a `(no response)` reply.
  *
- * Telegram caps a single message at 4096 chars. Long assistant replies
- * are split at the last newline within budget, falling back to a hard
- * split if no newline fits.
+ * Telegram caps a single message at 4096 chars; long assistant replies
+ * are split at the last newline within budget (or a hard split if no
+ * newline fits in the second half of the budget).
  */
 import type { Bot } from "grammy";
 
 const MAX_MESSAGE_LEN = 4096;
 
+/** Replace the leading status emoji (start-of-tool icon) with a result one. */
+function withResultIcon(startLine: string, icon: "✅" | "❌"): string {
+	// renderToolStart always emits "<emoji> <rest>". Swap the first cluster.
+	const sp = startLine.indexOf(" ");
+	if (sp < 0) return `${icon} ${startLine}`;
+	return `${icon}${startLine.slice(sp)}`;
+}
+
 export class TelegramStreamer {
-	private statusMsgId: number | undefined;
-	private statusText = "";
+	/** message_id of the in-flight tool status, keyed by toolCallId. */
+	private readonly toolMsgs = new Map<string, { messageId: number; startLine: string }>();
 	private committedAny = false;
 	private finalized = false;
 
@@ -32,77 +46,74 @@ export class TelegramStreamer {
 		if (this.finalized) return;
 		const trimmed = text.trim();
 		if (!trimmed) return;
-		// Drop the live status before posting the real reply so the
-		// status bubble doesn't sit visually below an answer it preceded.
-		await this.clearStatus();
 		for (const chunk of splitForTelegram(trimmed)) {
 			await this.send(chunk);
 		}
 		this.committedAny = true;
 	}
 
-	/** Show (or update) the ephemeral status line. Empty string clears. */
-	async setStatus(line: string): Promise<void> {
-		if (this.finalized) return;
-		if (line === this.statusText) return;
-		this.statusText = line;
-		if (!line) {
-			await this.clearStatus();
-			return;
-		}
-		if (this.statusMsgId === undefined) {
-			try {
-				const sent = await this.bot.api.sendMessage(this.chatId, line);
-				this.statusMsgId = sent.message_id;
-			} catch (err) {
-				console.warn("[status] send failed:", errMsg(err));
-			}
-			return;
-		}
+	/** New tool started: post a persistent status message for it. */
+	async toolStart(toolCallId: string, line: string): Promise<void> {
+		if (this.finalized || !line) return;
+		// Defensive: if we somehow see the same id twice, replace the old entry
+		// (the prior message stays in chat but is no longer tracked).
 		try {
-			await this.bot.api.editMessageText(
-				this.chatId,
-				this.statusMsgId,
-				line,
-			);
+			const sent = await this.bot.api.sendMessage(this.chatId, line);
+			this.toolMsgs.set(toolCallId, {
+				messageId: sent.message_id,
+				startLine: line,
+			});
+		} catch (err) {
+			console.warn("[tool-start] send failed:", errMsg(err));
+		}
+	}
+
+	/** Tool finished: rewrite its message in place with ✅ or ❌ <detail>. */
+	async toolEnd(
+		toolCallId: string,
+		isError: boolean,
+		errorLine: string | undefined,
+	): Promise<void> {
+		if (this.finalized) return;
+		const entry = this.toolMsgs.get(toolCallId);
+		if (!entry) return; // never saw the start — nothing to edit
+		this.toolMsgs.delete(toolCallId);
+		const next = isError
+			? errorLine || withResultIcon(entry.startLine, "❌")
+			: withResultIcon(entry.startLine, "✅");
+		if (next === entry.startLine) return;
+		try {
+			await this.bot.api.editMessageText(this.chatId, entry.messageId, next);
 		} catch (err) {
 			const msg = errMsg(err);
 			if (!msg.includes("not modified")) {
-				console.warn("[status] edit failed:", msg);
+				console.warn("[tool-end] edit failed:", msg);
 			}
 		}
+	}
+
+	/** One-shot informational line (retries, notices). Posted as its own msg. */
+	async notice(line: string): Promise<void> {
+		if (this.finalized || !line) return;
+		await this.send(line);
 	}
 
 	async finalize(): Promise<void> {
 		if (this.finalized) return;
 		this.finalized = true;
-		await this.clearStatus();
+		// Anything still "in-flight" at finalize had no end event — leave the
+		// start message as-is rather than guessing a result icon.
+		this.toolMsgs.clear();
 		if (!this.committedAny) {
 			await this.send("(no response)");
 		}
 	}
 
-	/** Surface an error after a turn fails: clear status, send verbatim text. */
+	/** Surface an error after a turn fails: send verbatim text. */
 	async replaceWith(text: string): Promise<void> {
 		this.finalized = true;
-		await this.clearStatus();
+		this.toolMsgs.clear();
 		await this.send(text);
-	}
-
-	private async clearStatus(): Promise<void> {
-		if (this.statusMsgId === undefined) return;
-		const id = this.statusMsgId;
-		this.statusMsgId = undefined;
-		this.statusText = "";
-		try {
-			await this.bot.api.deleteMessage(this.chatId, id);
-		} catch (err) {
-			// Already deleted, too old to delete, or rate-limited — non-fatal.
-			const msg = errMsg(err);
-			if (!msg.includes("message to delete not found")) {
-				console.warn("[status] delete failed:", msg);
-			}
-		}
 	}
 
 	private async send(text: string): Promise<void> {

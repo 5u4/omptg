@@ -1,5 +1,6 @@
 /**
- * Smoke for the streamer: assistant commit + ephemeral status + chunking.
+ * Smoke for the streamer: assistant commit, per-tool persistent status
+ * messages (sendMessage on start, editMessageText on end), and chunking.
  * Stubs bot.api with recorders; no telegram traffic.
  *
  *   bun run src/smoke-chunk.ts
@@ -82,23 +83,31 @@ async function main() {
 		console.log("✓ short commit stays in one message");
 	}
 
-	// --- Case 3: status message lifecycle (send → edit → delete on commit). ---
+	// --- Case 3: each tool gets its own message; end rewrites it in place. ---
 	{
 		const { bot, sends, edits, deletes } = makeFakeBot();
 		const streamer = new TelegramStreamer(bot, 1);
-		await streamer.setStatus("📖 read foo.ts");
-		await streamer.setStatus("📖 read bar.ts");
+		await streamer.toolStart("call-1", "📖 read foo.ts");
+		await streamer.toolStart("call-2", "💻 bash: ls");
+		await streamer.toolEnd("call-1", false, undefined);
+		await streamer.toolEnd("call-2", true, "❌ bash failed: nope");
 		await streamer.commitAssistant("done");
 		await streamer.finalize();
-		assert(sends.length === 2,
-			`expected 2 sends (status + commit), got ${sends.length}`);
-		assert(sends[0]!.text === "📖 read foo.ts", "initial status mismatch");
-		assert(edits.length === 1, `expected 1 status edit, got ${edits.length}`);
-		assert(edits[0]!.text === "📖 read bar.ts", "status edit mismatch");
-		assert(deletes.length === 1, `expected 1 status delete, got ${deletes.length}`);
-		assert(deletes[0]!.messageId === sends[0]!.messageId, "wrong msg deleted");
-		assert(sends[1]!.text === "done", "commit text mismatch");
-		console.log("✓ status message life-cycles cleanly around commit");
+
+		assert(sends.length === 3,
+			`expected 3 sends (2 tools + commit), got ${sends.length}`);
+		assert(sends[0]!.text === "📖 read foo.ts", "call-1 start text");
+		assert(sends[1]!.text === "💻 bash: ls", "call-2 start text");
+		assert(sends[2]!.text === "done", "commit text");
+		assert(edits.length === 2, `expected 2 edits, got ${edits.length}`);
+		// Match edits to their original send by messageId.
+		const editFor = (id: number) => edits.find(e => e.messageId === id);
+		assert(editFor(sends[0]!.messageId)?.text === "✅ read foo.ts",
+			`call-1 end should be ✅ read foo.ts, got ${editFor(sends[0]!.messageId)?.text}`);
+		assert(editFor(sends[1]!.messageId)?.text === "❌ bash failed: nope",
+			`call-2 end should be ❌ bash failed: nope, got ${editFor(sends[1]!.messageId)?.text}`);
+		assert(deletes.length === 0, "tool messages must NOT be deleted");
+		console.log("✓ per-tool messages rewritten in place, none deleted");
 	}
 
 	// --- Case 4: empty turn → "(no response)" fallback. ---
@@ -112,19 +121,35 @@ async function main() {
 		console.log("✓ empty turn yields (no response)");
 	}
 
-	// --- Case 5: status alone (no commit) is still deleted at finalize. ---
+	// --- Case 5: an in-flight tool at finalize stays as its start line. ---
 	{
-		const { bot, sends, deletes } = makeFakeBot();
+		const { bot, sends, edits, deletes } = makeFakeBot();
 		const streamer = new TelegramStreamer(bot, 1);
-		await streamer.setStatus("✨ thinking…");
+		await streamer.toolStart("call-x", "🔍 search /todo/ in src");
 		await streamer.finalize();
-		assert(deletes.length === 1, `status should be deleted, got ${deletes.length}`);
-		assert(sends.some(s => s.text === "(no response)"),
-			"no-response fallback missing");
-		console.log("✓ orphaned status is cleaned up on finalize");
+		assert(sends.length === 2,
+			`expected start + no-response, got ${sends.length}`);
+		assert(sends[0]!.text === "🔍 search /todo/ in src", "start line missing");
+		assert(edits.length === 0, "no end event → no edit");
+		assert(deletes.length === 0, "nothing should be deleted");
+		console.log("✓ in-flight tool at finalize keeps its start message");
 	}
 
-	// --- Case 6: splitForTelegram preserves content + respects budget. ---
+	// --- Case 6: notice() posts a persistent message of its own. ---
+	{
+		const { bot, sends, edits, deletes } = makeFakeBot();
+		const streamer = new TelegramStreamer(bot, 1);
+		await streamer.notice("🔄 retry 1/3");
+		await streamer.commitAssistant("ok");
+		await streamer.finalize();
+		assert(sends.length === 2, `expected notice + commit, got ${sends.length}`);
+		assert(sends[0]!.text === "🔄 retry 1/3", "notice text");
+		assert(sends[1]!.text === "ok", "commit text");
+		assert(edits.length === 0 && deletes.length === 0, "notice should not edit/delete");
+		console.log("✓ notice is its own persistent message");
+	}
+
+	// --- Case 7: splitForTelegram preserves content + respects budget. ---
 	{
 		const payload = "alpha\n".repeat(2000); // 12000 chars
 		const chunks = splitForTelegram(payload);
