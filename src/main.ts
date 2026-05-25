@@ -116,6 +116,27 @@ bot.use(async (ctx, next) => {
 	await next();
 });
 
+// Forwarded messages MUST NOT trigger slash commands. Telegram preserves
+// the original entities (including bot_command at offset 0) when a user
+// forwards a message into our chat, so grammY's bot.command() would
+// happily run /unbind/etc. against the new chat just because the original
+// message text started with a slash. Strip bot_command entities on any
+// forwarded message before downstream handlers see them — the text still
+// flows through message:text and gets wrapped as a [forwarded from …]
+// quote, which is what the user actually meant.
+bot.use(async (ctx, next) => {
+	const msg = ctx.message;
+	if (msg?.forward_origin && msg.entities?.some(e => e.type === "bot_command")) {
+		(msg as { entities?: typeof msg.entities }).entities =
+			msg.entities.filter(e => e.type !== "bot_command");
+		log.info("forward.command_stripped", {
+			chat_id: ctx.chat?.id,
+			text: msg.text?.slice(0, 80),
+		});
+	}
+	await next();
+});
+
 bot.command("start", ctx =>
 	ctx.reply(
 		[
@@ -451,7 +472,11 @@ bot.on("message:text", async ctx => {
 		forward = { kind, name, date: fwdOrigin.date, text: rawText };
 	}
 	const text = rawText;
-	if (text.startsWith("/")) {
+	// Forwarded messages: the text might literally start with "/something"
+	// but it's the forwarded body, not a command. Skip the slash-command
+	// branch entirely so the body falls through to the normal agent turn
+	// (where it gets wrapped as [forwarded from …]).
+	if (text.startsWith("/") && !forward) {
 		// First bot_command entity at offset 0 is the command. Strip an
 		// optional `@bot` suffix that telegram clients add in groups.
 		const entities = ctx.message.entities ?? [];
