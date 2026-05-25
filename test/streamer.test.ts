@@ -256,4 +256,26 @@ describe("TelegramStreamer activity coalescing", () => {
 		expect(stub.edits.length).toBe(1); // edit landed first
 		expect(order).toEqual(["send"]);   // then error message
 	});
+
+	test("replaceWith during the debounce window doesn't hang (regression)", async () => {
+		// Copilot review caught this: scheduleFlush used to add the pending
+		// promise to inflightFlushes immediately. If replaceWith cleared
+		// the timer before runOnce fired, the promise never resolved and
+		// Promise.allSettled hung indefinitely. Fix: only track post-timer
+		// flushes in inflightFlushes.
+		const stub = stubBot();
+		const s = new TelegramStreamer(stub.bot, 42);
+		await s.toolStart("t1", "📖 read a.ts");
+		await s.toolStart("t2", "💻 bash: ls"); // timer pending, not fired
+		const replacing = s.replaceWith("error: boom");
+		// Must complete promptly — well under the debounce window.
+		const raced = await Promise.race([
+			replacing.then(() => "done"),
+			Bun.sleep(100).then(() => "hang"),
+		]);
+		expect(raced).toBe("done");
+		// Error message landed; pending edit was cancelled before firing.
+		expect(stub.sends.some(s => s.text === "error: boom")).toBe(true);
+		expect(stub.edits.length).toBe(0);
+	});
 });

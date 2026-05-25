@@ -336,6 +336,11 @@ export class TelegramStreamer {
 				// set until the edit actually settles so `finalize` / drain
 				// can await the in-flight network call rather than racing it.
 				host.pendingFlushRun = null;
+				// Only count post-timer flushes as "in-flight" — pre-timer
+				// promises can be cancelled by `replaceWith` without ever
+				// resolving, and Promise.allSettled on a never-settling
+				// promise would hang.
+				this.inflightFlushes.add(p);
 				try { await this.flushActivityNow(host); }
 				finally {
 					host.pendingFlush = null;
@@ -348,7 +353,7 @@ export class TelegramStreamer {
 		});
 		host.pendingFlush = p;
 		host.pendingFlushRun = runOnce!;
-		this.inflightFlushes.add(p);
+
 		return p;
 	}
 
