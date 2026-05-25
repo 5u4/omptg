@@ -15,6 +15,7 @@ import { ChatRegistry, listStoredSessions } from "./chat.ts";
 import { ChatStore, expandHome } from "./chat-store.ts";
 import { parseCallback } from "./ui-bridge.ts";
 import { formatReplyPrompt, formatForwardPrompt, type ReplyContext, type ForwardContext } from "./quote.ts";
+import { downloadAsImageContent } from "./media.ts";
 import { initTheme } from "@oh-my-pi/pi-coding-agent";
 import { scoped, logPath } from "./logger.ts";
 
@@ -442,6 +443,57 @@ function knownCommands(): Set<string> {
 	}
 	return _knownCommands;
 }
+// Image input. Telegram sends an array of PhotoSize entries (thumbnail …
+// original); the last one is the largest. Download via getFile + the
+// public file CDN, base64-encode, and ship as a single ImageContent
+// alongside the caption (or a default prompt if no caption was supplied).
+//
+// Note: we DON'T forward the image as a fire-and-forget background turn
+// the way we do for text — image downloads are I/O-bound and we want the
+// "↪ steered" / typing feedback path to kick in only after we have a
+// payload to actually send. Errors surface as a reply to the user.
+bot.on("message:photo", async ctx => {
+	const photos = ctx.message.photo;
+	const largest = photos[photos.length - 1];
+	if (!largest) return; // shouldn't happen — telegram always sends ≥1
+	const caption = ctx.message.caption?.trim();
+	const text = caption || "What do you see?";
+
+	const chat = registry.get(ctx.chat.id);
+	const replyTo = ctx.message.message_id;
+
+	// Fire-and-forget like the text path — see comment in message:text for
+	// the deadlock rationale.
+	void (async () => {
+		try {
+			const image = await downloadAsImageContent(bot, largest.file_id);
+			if (chat.isStreaming) {
+				await ctx.reply("↪ steered (/cancel to abort)", {
+					disable_notification: true,
+					reply_parameters: { message_id: replyTo },
+				});
+			}
+			await chat.prompt(text, { replyTo, images: [image] });
+			const s = await chat.ensure();
+			await s.waitForIdle();
+		} catch (err) {
+			log.error("photo_turn.failed", {
+				chat_id: ctx.chat.id,
+				err: String(err),
+			});
+			try {
+				await ctx.reply(`❌ ${err instanceof Error ? err.message : String(err)}`, {
+					reply_parameters: { message_id: replyTo },
+				});
+			} catch (replyErr) {
+				log.error("photo_turn.error_reply_failed", { err: String(replyErr) });
+			}
+		} finally {
+			await chat.endTurn();
+		}
+	})();
+});
+
 bot.on("message:text", async ctx => {
 	const rawText = ctx.message.text;
 	// Detect telegram's native reply (long-press → reply). The replied-to

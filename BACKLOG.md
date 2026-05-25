@@ -29,27 +29,10 @@ to land in one session. Phases are loose — grab whatever feels useful.
 - chunked streaming past 4096-char telegram limit (seals prior msg, opens new one)
 - MarkdownV2 rendering for assistant replies (telegramify-markdown + fence-safe split)
 - `/retitle [name]` — rename session or LLM-regen via title-generator
+- image input via `message:photo` → base64 + ImageContent → session.prompt
 ---
 
-## Priority 1 — paper cuts you'll hit fast
 
-### P1.3 — Image input from telegram
-
-You send a photo, agent uses vision. SDK already supports
-`session.prompt(text, { images: [...] })`.
-
-**Approach**:
-- `bot.on("message:photo")` → pick the largest size, `bot.api.getFile`,
-  download bytes
-- caption (if any) is the prompt text; no caption → `"What do you see?"`
-- pass `{ images: [{ data: base64, mimeType: "image/jpeg" }] }`
-
-**Files**: `src/main.ts` (new handler), maybe a `src/media.ts` helper.
-Look at `ImageContent` type in
-`node_modules/@oh-my-pi/pi-coding-agent/dist/types/sdk.d.ts` for the
-exact shape. Smoke: take a screenshot, send, agent describes.
-
----
 
 ## Priority 2 — capability gaps
 

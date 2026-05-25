@@ -17,6 +17,7 @@ import type {
 	AgentSessionEvent,
 	SessionInfo,
 } from "@oh-my-pi/pi-coding-agent";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { Bot } from "grammy";
 import { TelegramStreamer } from "./streamer.ts";
 import { TypingIndicator } from "./typing.ts";
@@ -280,15 +281,18 @@ export class ChatSession {
 	 *  Starts the typing indicator; the caller must invoke
 	 *  `streamer.finalize()` after `waitForIdle()` returns so it can be
 	 *  stopped via the `agent_end` path (or the finalize fallback). */
-	async prompt(text: string, opts?: { replyTo?: number }): Promise<TelegramStreamer> {
+	async prompt(
+		text: string,
+		opts?: { replyTo?: number; images?: ImageContent[] },
+	): Promise<TelegramStreamer> {
 		const s = await this.ensure();
 		if (this.firstUserText === undefined) this.firstUserText = text;
 		this.streamer = new TelegramStreamer(this.bot, this.chatId, opts?.replyTo);
 		this.typing.start();
 		if (s.isStreaming) {
-			await s.steer(text);
+			await s.steer(text, opts?.images);
 		} else {
-			await s.prompt(text);
+			await s.prompt(text, opts?.images ? { images: opts.images } : undefined);
 		}
 		return this.streamer;
 	}
