@@ -166,10 +166,20 @@ bot.command("status", async ctx => {
 	const lines = [
 		`cwd: ${chat.cwd}`,
 		`session: ${chat.sessionId ?? "(not yet created)"}`,
+		`title: ${chat.sessionName ?? "-"}`,
 		`model: ${chat.modelId ?? "?"}`,
 		`streaming: ${chat.isStreaming}`,
 		`file: ${chat.sessionFile ?? "-"}`,
 	];
+	const usage = chat.contextUsage;
+	if (usage) {
+		const pct = usage.percent;
+		const tok = usage.tokens;
+		const win = usage.contextWindow;
+		const pctStr = pct === null ? "?" : `${pct.toFixed(1)}%`;
+		const tokStr = tok === null ? "?" : tok.toLocaleString("en-US");
+		lines.push(`context: ${pctStr} (${tokStr} / ${win.toLocaleString("en-US")})`);
+	}
 	await ctx.reply(lines.join("\n"));
 });
 

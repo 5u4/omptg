@@ -172,6 +172,17 @@ export class ChatSession {
 		return this.session?.model?.id;
 	}
 
+	get sessionName(): string | undefined {
+		return this.session?.sessionName;
+	}
+
+	/** {tokens, contextWindow, percent} for the active model, or undefined
+	 *  when no session exists yet. `tokens`/`percent` may be null right
+	 *  after a compaction, before the next assistant message. */
+	get contextUsage(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined {
+		return this.session?.getContextUsage();
+	}
+
 	get isStreaming(): boolean {
 		return this.session?.isStreaming ?? false;
 	}
