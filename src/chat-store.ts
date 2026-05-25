@@ -39,7 +39,9 @@ export interface TopicBinding {
 }
 
 export interface ChatBinding {
-	cwd: string;
+	/** Group-level cwd binding. `null` means "no group binding" — the
+	 *  entry exists only because per-topic bindings live on it. */
+	cwd: string | null;
 	label?: string;
 	added_at: string;
 	/** Per-topic overrides. Absent when no topic-level binding exists. */
@@ -118,20 +120,11 @@ export class ChatStore {
 		const existing = this.data.chats[key];
 		if (!existing) return false;
 		if (existing.topics && Object.keys(existing.topics).length > 0) {
-			// Keep topics; drop group-level fields by replacing the entry
-			// with a sentinel that has empty cwd. Simpler: store with a
-			// marker. Cleanest: just keep cwd but set a flag. Actually the
-			// simplest: track group-level presence by whether `cwd` is set.
-			// But cwd is required by interface. Use a separate concept:
-			// after delete, get() should return undefined for group binding
-			// while topic lookups continue to work. So: stash topics under
-			// a synthetic entry with cwd="" and add a `groupBindingActive`
-			// flag.
-			//
-			// Pragmatic choice instead: keep the whole entry but blank cwd
-			// to "" — callers ignore an empty cwd as "no group binding".
+			// Keep topics; clear the group-level cwd. `null` is the typed
+			// sentinel — callers checking truthiness see "no group binding"
+			// while topic lookups continue to back per-topic resolution.
 			this.data.chats[key] = {
-				cwd: "",
+				cwd: null,
 				added_at: existing.added_at,
 				topics: existing.topics,
 			};
@@ -164,7 +157,7 @@ export class ChatStore {
 		const existing = this.data.chats[key];
 		const entry: ChatBinding = existing
 			? { ...existing, topics: { ...(existing.topics ?? {}) } }
-			: { cwd: "", added_at: new Date().toISOString(), topics: {} };
+			: { cwd: null, added_at: new Date().toISOString(), topics: {} };
 		entry.topics![tkey] = {
 			...binding,
 			added_at: binding.added_at ?? new Date().toISOString(),

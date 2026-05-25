@@ -20,7 +20,7 @@
  * tests can drive deterministic before/after states.
  */
 import { createReadStream, createWriteStream, readdirSync, statSync, unlinkSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { basename, resolve as resolvePath } from "node:path";
 import { createGzip } from "node:zlib";
 import { pipeline } from "node:stream/promises";
 
@@ -149,7 +149,7 @@ export async function rotateLogs(
 	failed: Array<RotateAction & { err: string }>;
 }> {
 	const files = scanLogDir(dir);
-	const activeName = activeAbsPath.slice(activeAbsPath.lastIndexOf("/") + 1);
+	const activeName = basename(activeAbsPath);
 	const planned = planRotation(files, activeName, now, config);
 	const { done, failed } = await applyRotation(dir, planned);
 	return { planned, done, failed };

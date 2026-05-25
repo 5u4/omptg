@@ -142,7 +142,7 @@ describe("ChatStore — topic bindings", () => {
 	test("setTopic on chat with no group binding still works", () => {
 		const s = new ChatStore(storePath);
 		s.setTopic(1, 5, { cwd: "/y" });
-		expect(s.get(1)?.cwd).toBe(""); // synthetic placeholder
+		expect(s.get(1)?.cwd).toBeNull(); // synthetic placeholder, no group binding
 		expect(s.getTopic(1, 5)?.cwd).toBe("/y");
 	});
 
@@ -187,7 +187,7 @@ describe("ChatStore — topic bindings", () => {
 		s.setTopic(1, 5, { cwd: "/y" });
 		s.delete(1);
 		// Group cwd cleared, but topic still bound.
-		expect(s.get(1)?.cwd).toBe("");
+		expect(s.get(1)?.cwd).toBeNull();
 		expect(s.getTopic(1, 5)?.cwd).toBe("/y");
 	});
 
@@ -239,7 +239,7 @@ describe("ChatStore.resolveCwd — topic > group > undefined", () => {
 		s.set(1, { cwd: "/group" });
 		s.setTopic(1, 5, { cwd: "/topic" });
 		s.delete(1);
-		// Group cwd is now "". Topic 99 has no own binding → no fallback.
+		// Group cwd is now null. Topic 99 has no own binding → no fallback.
 		expect(s.resolveCwd(1, 99)).toBeUndefined();
 		// Topic 5 still has its own → wins.
 		expect(s.resolveCwd(1, 5)).toBe("/topic");
