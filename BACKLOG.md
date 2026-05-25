@@ -56,24 +56,6 @@ to land in one session. Phases are loose — grab whatever feels useful.
 
 ## Priority 3 — bigger features (you originally wanted)
 
-### P3.1 — Topic auto-bind to cwd
-
-Forum topics already get their own session + per-topic `/bind` (see
-"Done so far"). Open question: when a brand-new topic is created,
-should it auto-bind to a cwd instead of requiring an explicit `/bind`
-in that topic?
-
-**Options**:
-- config file mapping `topic_name_regex → cwd`
-- inherit the group binding until first `/bind` (current behavior —
-  may already be enough)
-- a `/bind` issued in General sets the default for new topics in
-  that forum
-
-Probably wait until the current behavior actually hurts before
-designing this. **References**: FreakySurgeon's
-`omp-tg-bridge/src/omp_telegram/topic.py`.
-
 ### P3.2 — Multi-bot from one process
 
 One bot per "persona" or per project, sharing the same code. Each bot
