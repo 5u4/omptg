@@ -23,6 +23,7 @@ import { TelegramUI, type PendingUiRequest } from "./ui-bridge.ts";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { scoped } from "./logger.ts";
 import { ChatStore } from "./chat-store.ts";
+import { renderToolStart, renderToolEnd } from "./tool-render.ts";
 
 export interface ChatSessionOptions {
 	chatId: number;
@@ -206,12 +207,22 @@ export class ChatSession {
 				break;
 			}
 			case "tool_execution_start": {
-				const ev = event as { toolName?: string };
-				if (ev.toolName) s?.pushStatus(`🔧 ${ev.toolName}`);
+				const ev = event as { toolName?: string; args?: unknown };
+				if (ev.toolName) s?.pushStatus(renderToolStart(ev.toolName, ev.args));
 				break;
 			}
 			case "tool_execution_end": {
-				s?.pushStatus("");
+				const ev = event as {
+					toolName?: string;
+					result?: unknown;
+					isError?: boolean;
+				};
+				if (ev.toolName && ev.isError) {
+					const line = renderToolEnd(ev.toolName, ev.result, ev.isError);
+					if (line) s?.pushStatus(line);
+				} else {
+					s?.pushStatus("");
+				}
 				break;
 			}
 			case "notice": {
