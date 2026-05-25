@@ -1,0 +1,743 @@
+/**
+ * Per-chat agent runtime. One ChatSession owns:
+ *   - the cwd it's bound to
+ *   - the live AgentSession (recreated on /new, /dir, /resume)
+ *   - the currently-rendering TelegramStreamer (one per in-flight turn)
+ *   - pending UI requests awaiting a button tap or text reply
+ *
+ * Keyed by chat_id in ChatRegistry. v1 is single-thread; topic support
+ * lands once we observe how Telegram groups behave.
+ */
+import {
+	createAgentSession,
+	SessionManager,
+} from "@oh-my-pi/pi-coding-agent";
+import type {
+	AgentSession,
+	AgentSessionEvent,
+	SessionInfo,
+} from "@oh-my-pi/pi-coding-agent";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import type { Bot } from "grammy";
+import { TelegramStreamer } from "./streamer.ts";
+import { TypingIndicator } from "./typing.ts";
+import { TelegramUI, type PendingUiRequest } from "./ui-bridge.ts";
+import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { scoped } from "./logger.ts";
+import { ChatStore } from "./chat-store.ts";
+import { renderToolStart, renderToolEnd } from "./tool-render.ts";
+
+export interface ChatSessionOptions {
+	chatId: number;
+	cwd: string;
+	bot: Bot;
+	/** Forum topic id this session is scoped to. undefined = DM / non-forum
+	 *  group / forum General topic. Drives both ChatRegistry keying and
+	 *  outbound message routing (sendMessage / sendChatAction). */
+	threadId?: number;
+}
+
+/**
+ * Pull the visible text out of an assistant message's content array.
+ * Assistant content is `(TextContent | ThinkingContent | RedactedThinking |
+ * ToolCall)[]` — we keep only `TextContent` so thinking blocks (when the
+ * provider exposes them) and tool-call payloads don't leak to the chat.
+ */
+function extractAssistantText(content: unknown): string {
+	if (!Array.isArray(content)) return "";
+	const parts: string[] = [];
+	for (const part of content) {
+		if (part && typeof part === "object"
+			&& (part as { type?: unknown }).type === "text"
+			&& typeof (part as { text?: unknown }).text === "string"
+		) {
+			parts.push((part as { text: string }).text);
+		}
+	}
+	return parts.join("").trim();
+}
+
+/**
+ * Extra system-prompt block injected on every ChatSession we spawn.
+ * Telegram MarkdownV2 has no table syntax; we wrap tables in code
+ * fences as a safety net, but mobile-screen wrapping makes that ugly,
+ * so we ask the model to prefer lists / key:value lines / inline prose
+ * for small data sets. Appended AFTER the SDK defaults.
+ */
+const TELEGRAM_SYSTEM_BLOCK = [
+	"# Telegram output guidance",
+	"",
+	"You are talking to the user through a Telegram bot, not a terminal or IDE.",
+	"Telegram MarkdownV2 supports bold/italic, inline code, fenced code",
+	"blocks, links, and lists — but NOT real headings, NOT tables, and NOT",
+	"wide ASCII diagrams. All of these wrap poorly or render flat on phone",
+	"screens.",
+	"",
+	"For comparisons / option matrices / small data sets, prefer:",
+	"  - a markdown list with a one-line summary per item, OR",
+	"  - `key: value` lines under a short heading, OR",
+	"  - a compact paragraph that names the trade-offs inline.",
+	"",
+	"Only use a GFM table when the data genuinely has 3+ columns AND",
+	"the user explicitly asked for a table. Otherwise the bot wraps the",
+	"table in a code fence as a fallback, which is ugly on mobile.",
+
+	"AVOID markdown headings (`#`, `##`, `###`). Telegram has no heading",
+	"syntax — every level collapses to a single bold line, so a `#` title",
+	"and a `###` subsection look identical and the document hierarchy is",
+	"lost. The bridge rewrites headings to distinct visual markers as a",
+	"fallback, but the result is still less readable than prose. Prefer:",
+	"  - a short bold lead-in line (`**Topic.**`) followed by content, OR",
+	"  - a numbered/bulleted list when you'd reach for `###` per item.",
+].join("\n");
+
+function withTelegramPrompt(defaults: string[]): string[] {
+	return [...defaults, TELEGRAM_SYSTEM_BLOCK];
+}
+
+/**
+ * First user-typed prompt in a session's history. Used by /retitle (no
+ * args) to give the title-generator something to work with after a
+ * resume — when `firstUserText` from the in-memory turn loop is undefined
+ * because we never replayed the original prompt.
+ *
+ * User content can be a plain string (older entries) or a `MessageContent[]`
+ * with `{type:"text", text}` parts; cover both shapes.
+ */
+function extractFirstUserText(messages: readonly unknown[]): string | undefined {
+	for (const m of messages) {
+		if (!m || typeof m !== "object") continue;
+		const role = (m as { role?: unknown }).role;
+		if (role !== "user") continue;
+		const content = (m as { content?: unknown }).content;
+		if (typeof content === "string") {
+			const trimmed = content.trim();
+			if (trimmed) return trimmed;
+			continue;
+		}
+		if (Array.isArray(content)) {
+			const text = content
+				.filter((p): p is { type: string; text: string } =>
+					!!p && typeof p === "object"
+					&& (p as { type?: unknown }).type === "text"
+					&& typeof (p as { text?: unknown }).text === "string")
+				.map(p => p.text)
+				.join("")
+				.trim();
+			if (text) return text;
+		}
+	}
+	return undefined;
+}
+
+export class ChatSession {
+	readonly chatId: number;
+	readonly threadId: number | undefined;
+	cwd: string;
+	private readonly bot: Bot;
+	private session: AgentSession | undefined;
+	private unsubscribe: (() => void) | undefined;
+	private streamer: TelegramStreamer | undefined;
+	private readonly ui: TelegramUI;
+	private readonly typing: TypingIndicator;
+	private readonly log;
+	/** First user message text in the current session, captured for title gen. */
+	private firstUserText: string | undefined;
+	/** Set once we've attempted (or completed) title generation for the
+	 *  current session; cleared whenever session is recreated. */
+	private titleAttempted = false;
+	/** Latched on first ensure() call (per chat lifetime, not per session).
+	 *  Prevents re-running auto-resume after the user explicitly /new'd
+	 *  away from the recovered session — we only try once on cold boot. */
+	private autoResumeTried = false;
+	/**
+	 * Most recent assistant message_end text, NOT yet sent. We delay the
+	 * send because the model often emits "I'll read X then edit Y" as a
+	 * standalone assistant message right before calling a tool — flushing
+	 * that verbatim is the dogfooding complaint. Resolution:
+	 *  - tool_execution_start arrives → it was a preamble → truncated heartbeat
+	 *  - agent_end arrives          → it was the final reply → full chunked send
+	 *  - dispose/endTurn safety net → final send (covers crashed turns)
+	 */
+	private pendingAssistantText: string | undefined;
+
+	/**
+	 * Cache of the last `/sessions` listing, so `/resume <n>` resolves
+	 * the 1-based index the user saw. Per-ChatSession (not per-chat-id)
+	 * so a forum group's topic A and topic B don't share the cache.
+	 *
+	 * Stale entries are harmless: `/resume` re-validates length and
+	 * re-opens by path.
+	 */
+	recentSessions: SessionInfo[] = [];
+
+	constructor(opts: ChatSessionOptions) {
+		this.chatId = opts.chatId;
+		this.threadId = opts.threadId;
+		this.cwd = opts.cwd;
+		this.bot = opts.bot;
+		this.ui = new TelegramUI(opts.bot, opts.chatId, opts.threadId);
+		this.typing = new TypingIndicator(opts.bot, opts.chatId, opts.threadId);
+		const suffix = opts.threadId !== undefined ? `:${opts.threadId}` : "";
+		this.log = scoped(`chat:${opts.chatId}${suffix}`);
+	}
+
+	get hasSession(): boolean {
+		return this.session !== undefined;
+	}
+
+	get sessionId(): string | undefined {
+		return this.session?.sessionId;
+	}
+
+	get sessionFile(): string | undefined {
+		return this.session?.sessionFile;
+	}
+
+	get modelId(): string | undefined {
+		return this.session?.model?.id;
+	}
+
+	get sessionName(): string | undefined {
+		return this.session?.sessionName;
+	}
+
+	/** {tokens, contextWindow, percent} for the active model, or undefined
+	 *  when no session exists yet. `tokens`/`percent` may be null right
+	 *  after a compaction, before the next assistant message. */
+	get contextUsage(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined {
+		return this.session?.getContextUsage();
+	}
+
+	get isStreaming(): boolean {
+		return this.session?.isStreaming ?? false;
+	}
+
+	/** True from the moment we dispatch a user turn until `agent_end`
+	 *  (or abort/endTurn) fires. Reflects "is the user still waiting on
+	 *  the LLM?", not the SDK's `isStreaming` — which stays true through
+	 *  post-stream deferred work (persistence, mental-models refresh,
+	 *  auto-compaction). Using the SDK flag for the "↪ steered" ack
+	 *  caused stale acks on the user's next message after the reply
+	 *  had already landed. */
+	private turnActive = false;
+	get isTurnActive(): boolean {
+		return this.turnActive;
+	}
+
+	/**
+	 * Return existing session, or — on the very first ensure() of a chat's
+	 * lifetime — try to resume the most recent stored session in this cwd
+	 * so a bot restart picks up where the user left off. Falls through to
+	 * createFresh() if there's nothing to resume, or if open fails.
+	 *
+	 * Skipped after /new, /resume, or any other path that explicitly placed
+	 * a session via attach() (autoResumeTried gets latched on first call,
+	 * and an existing this.session short-circuits before we even look).
+	 */
+	async ensure(): Promise<AgentSession> {
+		if (this.session) return this.session;
+		if (!this.autoResumeTried) {
+			this.autoResumeTried = true;
+			const recovered = await this.tryAutoResume();
+			if (recovered) return recovered;
+		}
+		return this.createFresh();
+	}
+
+	private async tryAutoResume(): Promise<AgentSession | undefined> {
+		try {
+			const sessions = await SessionManager.list(this.cwd);
+			if (sessions.length === 0) return undefined;
+			const newest = sessions.reduce((a, b) =>
+				a.modified.getTime() >= b.modified.getTime() ? a : b,
+			);
+			const manager = await SessionManager.open(newest.path);
+			const created = await createAgentSession({
+				cwd: manager.getCwd(),
+				sessionManager: manager,
+				hasUI: true,
+				systemPrompt: withTelegramPrompt,
+			});
+			this.cwd = manager.getCwd();
+			this.attach(created.session, created.setToolUIContext);
+			this.log.info("session.auto_resumed", {
+				session_id: created.session.sessionId,
+				path: newest.path,
+				name: created.session.sessionName,
+			});
+			return created.session;
+		} catch (err) {
+			this.log.warn("session.auto_resume_failed", { err: String(err) });
+			return undefined;
+		}
+	}
+
+	/** Replace the current session with a brand-new one in the same cwd. */
+	async newSession(): Promise<AgentSession> {
+		await this.dispose();
+		return this.createFresh();
+	}
+
+	/** Swap cwd + start a fresh session there. */
+	async switchCwd(newCwd: string): Promise<AgentSession> {
+		await this.dispose();
+		this.cwd = newCwd;
+		return this.createFresh();
+	}
+
+	/** Open a stored session file. */
+	async resume(sessionPath: string): Promise<AgentSession> {
+		await this.dispose();
+		const manager = await SessionManager.open(sessionPath);
+		const created = await createAgentSession({
+				cwd: manager.getCwd(),
+				sessionManager: manager,
+				hasUI: true,
+				systemPrompt: withTelegramPrompt,
+			});
+		this.cwd = manager.getCwd();
+		this.attach(created.session, created.setToolUIContext);
+		return created.session;
+	}
+
+	async dispose(): Promise<void> {
+		this.unsubscribe?.();
+		this.typing.stop();
+		this.unsubscribe = undefined;
+		if (this.session) {
+			try {
+				await this.session.dispose();
+			} catch (err) {
+				this.log.warn("dispose.failed", { err: String(err) });
+			}
+			this.session = undefined;
+		}
+		// Drain any in-flight tool edits / final assistant chunk that
+		// handleEvent scheduled before we unsubscribed. finalize() awaits
+		// the chain tail and is idempotent — safe if endTurn already ran.
+		// Doing this BEFORE clearing `streamer` ensures the chain settles
+		// against the live instance; otherwise a stray `[send] failed:`
+		// log shows up on shutdown after `bot.stop()` invalidates the api.
+		if (this.streamer) {
+			try {
+				await this.streamer.finalize();
+			} catch (err) {
+				this.log.warn("dispose.streamer_finalize_failed", { err: String(err) });
+			}
+		}
+		this.streamer = undefined;
+		this.firstUserText = undefined;
+		this.pendingAssistantText = undefined;
+		this.titleAttempted = false;
+	}
+
+	private async createFresh(): Promise<AgentSession> {
+		const manager = SessionManager.create(
+			this.cwd,
+			SessionManager.getDefaultSessionDir(this.cwd),
+		);
+		const created = await createAgentSession({
+				cwd: this.cwd,
+				sessionManager: manager,
+				hasUI: true,
+				systemPrompt: withTelegramPrompt,
+			});
+		if (created.modelFallbackMessage) {
+			console.warn(
+				`[chat ${this.chatId}] ${created.modelFallbackMessage}`,
+			);
+		}
+		this.attach(created.session, created.setToolUIContext);
+		return created.session;
+	}
+
+	private attach(
+		session: AgentSession,
+		setToolUIContext: (ctx: TelegramUI, hasUI: boolean) => void,
+	): void {
+		this.session = session;
+		// Inject our telegram-backed UI before any tool can call into it.
+		setToolUIContext(this.ui, true);
+		this.unsubscribe = session.subscribe(e => this.handleEvent(e));
+		// Resuming a session preloads sessionName; don't try to generate again.
+		this.titleAttempted = Boolean(session.sessionName);
+		this.firstUserText = undefined;
+		this.pendingAssistantText = undefined;
+		this.log.info("session.attached", {
+			session_id: session.sessionId,
+			cwd: this.cwd,
+			name: session.sessionName,
+		});
+	}
+
+	/** Send a user turn. Caller must wait via waitForIdle separately.
+	 *  Starts the typing indicator; the caller must invoke
+	 *  `streamer.finalize()` after `waitForIdle()` returns so it can be
+	 *  stopped via the `agent_end` path (or the finalize fallback). */
+	async prompt(
+		text: string,
+		opts?: { replyTo?: number; images?: ImageContent[] },
+	): Promise<TelegramStreamer> {
+		const s = await this.ensure();
+		if (this.firstUserText === undefined) this.firstUserText = text;
+		this.streamer = new TelegramStreamer(this.bot, this.chatId, opts?.replyTo, this.threadId);
+		this.typing.start();
+		this.turnActive = true;
+		if (s.isStreaming) {
+			await s.steer(text, opts?.images);
+		} else {
+			await s.prompt(text, opts?.images ? { images: opts.images } : undefined);
+		}
+		return this.streamer;
+	}
+
+	async abort(): Promise<boolean> {
+		if (!this.session?.isStreaming) return false;
+		await this.session.abort();
+		this.typing.stop();
+		this.turnActive = false;
+		return true;
+	}
+
+	/** Finish the current turn: stop the typing bubble and finalize the
+	 *  streamer (clears the status message and ensures the user sees a
+	 *  reply even if the agent produced none). Idempotent. */
+	async endTurn(): Promise<void> {
+		this.typing.stop();
+		this.turnActive = false;
+		// Belt + suspenders: if agent_end never fired (crash, abort, etc.)
+		// the pending assistant text would otherwise be lost. Flush it via
+		// the same chain so order is preserved relative to any tool events
+		// still queued. `finalize()` then awaits the chain tail before
+		// flipping `finalized` and clearing `toolMsgs`.
+		const final = this.pendingAssistantText;
+		this.pendingAssistantText = undefined;
+		const s = this.streamer;
+		if (s && final) s.enqueue(() => s.commitAssistant(final));
+		await s?.finalize();
+	}
+
+	/** Forward UI pending-request resolution from callback or text reply. */
+	resolvePending(payload:
+		| { kind: "callback"; requestId: string; value: unknown }
+		| { kind: "text"; text: string }): boolean {
+		return this.ui.resolve(payload);
+	}
+
+	pendingUi(): PendingUiRequest | undefined {
+		return this.ui.pending();
+	}
+
+	private handleEvent(event: AgentSessionEvent): void {
+		const s = this.streamer;
+		switch (event.type) {
+			// Text deltas are intentionally ignored. The previous design
+			// streamed every token into a placeholder message, which surfaced
+			// a lot of mid-turn reasoning prose to the chat.
+			//
+			// `message_end` text is BUFFERED (not committed) because OMP fires
+			// one message_end per assistant message, and a turn typically
+			// looks like: assistant prose → tool → tool → assistant prose →
+			// tool → … → final assistant prose → agent_end. The non-final
+			// prose blocks are "preambles" the user doesn't need verbatim.
+			// We flush at the next tool_execution_start (as a one-line
+			// heartbeat) or at agent_end (as the full reply).
+			case "message_end": {
+				const msg = (event as { message?: { role?: string; content?: unknown } }).message;
+				if (!msg || msg.role !== "assistant") break;
+				const text = extractAssistantText(msg.content);
+				if (text) {
+					this.pendingAssistantText = text;
+				} else if (Array.isArray(msg.content) && msg.content.length > 0) {
+					// Non-empty content array that yielded zero visible text:
+					// either it's pure tool-calls / thinking blocks (benign,
+					// the next tool_execution_start handles it) OR the SDK
+					// changed its content shape and our extractor missed it
+					// (catastrophic — the user's reply silently vanishes).
+					// Surface enough to diagnose without flooding logs.
+					this.log.warn("message_end.empty_text", {
+						content_types: msg.content
+							.map(c => (c as { type?: unknown })?.type ?? typeof c)
+							.slice(0, 8),
+					});
+				}
+				break;
+			}
+			case "tool_execution_start": {
+				const ev = event as { toolCallId?: string; toolName?: string; args?: unknown };
+				if (!s || !ev.toolCallId || !ev.toolName) break;
+				const pre = this.pendingAssistantText;
+				this.pendingAssistantText = undefined;
+				const line = renderToolStart(ev.toolName, ev.args);
+				const id = ev.toolCallId;
+				// Serialize preamble→tool so order is deterministic in chat,
+				// AND so endTurn's finalize() drains them before clearing
+				// toolMsgs / flipping `finalized`.
+				s.enqueue(async () => {
+					if (pre) await s.commitPreamble(pre);
+					await s.toolStart(id, line);
+				});
+				break;
+			}
+			case "tool_execution_end": {
+				const ev = event as {
+					toolCallId?: string;
+					toolName?: string;
+					result?: unknown;
+					isError?: boolean;
+				};
+				if (!s || !ev.toolCallId || !ev.toolName) break;
+				const isError = ev.isError === true;
+				const errorLine = isError
+					? renderToolEnd(ev.toolName, ev.result, true) || undefined
+					: undefined;
+				const toolCallId = ev.toolCallId;
+				s.enqueue(() => s.toolEnd(toolCallId, isError, errorLine));
+				break;
+			}
+			case "notice": {
+				const n = event as { level: string; message: string };
+				this.log.info("notice", { level: n.level, message: n.message });
+				break;
+			}
+			case "auto_retry_start": {
+				const ev = event as { attempt: number; maxAttempts: number };
+				s?.enqueue(() => s.notice(`🔄 retry ${ev.attempt}/${ev.maxAttempts}`));
+				break;
+			}
+			case "agent_end": {
+				this.typing.stop();
+				this.turnActive = false;
+				// Whatever's still pending is the final assistant reply.
+				const final = this.pendingAssistantText;
+				this.pendingAssistantText = undefined;
+				if (s && final) s.enqueue(() => s.commitAssistant(final));
+				this.maybeGenerateTitle();
+				break;
+			}
+			default:
+				break;
+		}
+	}
+
+	/** Fire-and-forget title generation after the first agent turn.
+	 *  Uses OMP's built-in title-generator which picks `commit` or `smol`
+	 *  role automatically and writes back via `session.setSessionName`. */
+	private maybeGenerateTitle(): void {
+		if (this.titleAttempted) return;
+		const session = this.session;
+		const first = this.firstUserText;
+		if (!session || !first) return;
+		// Don't overwrite a name that already exists (loaded from a resumed
+		// session or set by `/name` if we add that later).
+		if (session.sessionName) {
+			this.titleAttempted = true;
+			return;
+		}
+		this.titleAttempted = true;
+		const log = this.log;
+		void (async () => {
+			try {
+				const title = await generateSessionTitle(
+					first,
+					session.modelRegistry,
+					session.settings,
+					session.sessionId,
+					session.model,
+				);
+				if (!title) {
+					log.info("title.skipped", { reason: "generator_returned_null" });
+					return;
+				}
+				const ok = await session.setSessionName(title, "auto");
+				log.info("title.set", { title, ok });
+			} catch (err) {
+				log.warn("title.failed", { err: String(err) });
+			}
+		})();
+	}
+
+	/** Explicit user-supplied title. Persists to the session file as
+	 *  source="user". Returns false if there's no active session or the
+	 *  underlying setSessionName rejected. */
+	async setTitle(name: string): Promise<boolean> {
+		const session = this.session;
+		if (!session) return false;
+		const ok = await session.setSessionName(name, "user");
+		this.log.info("title.user_set", { title: name, ok });
+		// Treat a successful manual title as "we have a name now" so the
+		// auto-generator won't try to clobber it on the next turn.
+		if (ok) this.titleAttempted = true;
+		return ok;
+	}
+
+	/** Force a fresh LLM-generated title regardless of prior state. Returns
+	 *  the new title or undefined if no session, no first-message context,
+	 *  or the generator returned null. */
+	async regenerateTitle(): Promise<string | undefined> {
+		const session = this.session;
+		if (!session) return undefined;
+		const first = this.firstUserText ?? extractFirstUserText(session.messages);
+		if (!first) return undefined;
+		try {
+			const title = await generateSessionTitle(
+				first,
+				session.modelRegistry,
+				session.settings,
+				session.sessionId,
+				session.model,
+			);
+			if (!title) {
+				this.log.info("title.regen_skipped", { reason: "generator_returned_null" });
+				return undefined;
+			}
+			const ok = await session.setSessionName(title, "auto");
+			this.log.info("title.regen_set", { title, ok });
+			this.titleAttempted = true;
+			return ok ? title : undefined;
+		} catch (err) {
+			this.log.warn("title.regen_failed", { err: String(err) });
+			return undefined;
+		}
+	}
+
+	/** Available models (with valid API keys) for the active session.
+	 *  Lazily ensures a session so /model works on a cold chat too. */
+	async getAvailableModels(): Promise<readonly Model[]> {
+		const s = await this.ensure();
+		return s.getAvailableModels();
+	}
+
+	/** Temporarily switch the default-role model for the active session.
+	 *  Does NOT persist to global settings (Telegram-side choice shouldn't
+	 *  leak into CLI default). Returns the model on success, undefined if
+	 *  `id` isn't in the available list. */
+	async setModelById(id: string): Promise<Model | undefined> {
+		const s = await this.ensure();
+		const model = s.getAvailableModels().find(m => m.id === id);
+		if (!model) return undefined;
+		await s.setModelTemporary(model);
+		this.log.info("model.set", { id });
+		return model;
+	}
+
+	/** Open an inline-keyboard picker listing available model ids and
+	 *  apply the choice via setModelTemporary. Returns the chosen model,
+	 *  or undefined on cancel / no models. */
+	async promptModelSelection(): Promise<Model | undefined> {
+		const s = await this.ensure();
+		const models = s.getAvailableModels();
+		if (models.length === 0) return undefined;
+		const ids = models.map(m => m.id);
+		const picked = await this.ui.select("pick model", ids);
+		if (!picked) return undefined;
+		const model = models.find(m => m.id === picked);
+		if (!model) return undefined;
+		await s.setModelTemporary(model);
+		this.log.info("model.set", { id: model.id });
+		return model;
+	}
+
+	/** Manually compact the active session's context.
+	 *
+	 *  Returns a discriminated result so the caller can render specific
+	 *  user-facing messages without leaking errors. We refuse while the
+	 *  agent is streaming — OMP's auto-compaction handles in-flight
+	 *  overflow, and `session.compact()` would abort the live turn. */
+	async compact(
+		instructions?: string,
+	): Promise<
+		| { status: "no-session" }
+		| { status: "busy" }
+		| { status: "ok"; summary: string; tokensBefore: number; tokensAfter: number | null; contextWindow: number }
+		| { status: "error"; message: string }
+	> {
+		const session = this.session;
+		if (!session) return { status: "no-session" };
+		if (session.isStreaming) return { status: "busy" };
+		try {
+			const result = await session.compact(instructions);
+			const after = session.getContextUsage();
+			const summary = result.shortSummary?.trim() || result.summary.trim();
+			this.log.info("compact.ok", {
+				tokens_before: result.tokensBefore,
+				tokens_after: after?.tokens ?? null,
+				instructions: instructions ?? null,
+			});
+			return {
+				status: "ok",
+				summary,
+				tokensBefore: result.tokensBefore,
+				tokensAfter: after?.tokens ?? null,
+				contextWindow: after?.contextWindow ?? 0,
+			};
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.log.warn("compact.failed", { err: message });
+			return { status: "error", message };
+		}
+	}
+}
+
+export class ChatRegistry {
+	/** Key: `${chatId}:${threadId ?? ""}`. Empty thread segment for DMs /
+	 *  non-forum groups / forum General — same key as before forum
+	 *  support, so non-forum behavior is unchanged. */
+	private readonly chats = new Map<string, ChatSession>();
+
+	constructor(
+		private readonly bot: Bot,
+		private readonly defaultCwd: string,
+		private readonly store: ChatStore,
+	) {}
+
+	/** Persistent binding store, exposed for command handlers. */
+	get bindings(): ChatStore {
+		return this.store;
+	}
+
+	/** Three-level resolution: topic binding → group binding → defaultCwd. */
+	cwdFor(chatId: number, threadId?: number): string {
+		return this.store.resolveCwd(chatId, threadId) ?? this.defaultCwd;
+	}
+
+	private key(chatId: number, threadId?: number): string {
+		return `${chatId}:${threadId ?? ""}`;
+	}
+
+	get(chatId: number, threadId?: number): ChatSession {
+		const k = this.key(chatId, threadId);
+		let chat = this.chats.get(k);
+		if (!chat) {
+			chat = new ChatSession({
+				chatId,
+				threadId,
+				cwd: this.cwdFor(chatId, threadId),
+				bot: this.bot,
+			});
+			this.chats.set(k, chat);
+		}
+		return chat;
+	}
+
+	all(): ChatSession[] {
+		return [...this.chats.values()];
+	}
+
+	async disposeAll(): Promise<void> {
+		await Promise.allSettled([...this.chats.values()].map(c => c.dispose()));
+		this.chats.clear();
+	}
+}
+
+/** Helper: list stored sessions for a cwd. */
+export async function listStoredSessions(
+	cwd: string,
+	limit = 8,
+): Promise<SessionInfo[]> {
+	const sessions = await SessionManager.list(cwd);
+	return sessions
+		.sort((a, b) => b.modified.getTime() - a.modified.getTime())
+		.slice(0, limit);
+}
