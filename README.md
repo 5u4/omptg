@@ -30,7 +30,8 @@ bun run src/smoke.ts /path/to/repo
 
 # Wire telegram.
 cp .env.example .env
-# fill TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_CHATS, OMP_DEFAULT_CWD
+# fill TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_CHATS
+# OMP_DEFAULT_CWD is optional (defaults to process.cwd())
 bun start
 ```
 

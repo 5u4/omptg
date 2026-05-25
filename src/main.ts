@@ -20,7 +20,12 @@ import { scoped, logPath } from "./logger.ts";
 const log = scoped("main");
 
 const TOKEN = required("TELEGRAM_BOT_TOKEN");
-const DEFAULT_CWD = resolveDir(required("OMP_DEFAULT_CWD"));
+// OMP_DEFAULT_CWD is optional. If unset we fall back to process.cwd() so
+// running `bun run start` (or pm2 with a `cwd` field) Just Works without
+// per-host env tweaks. The resolved path is logged at boot.start so the
+// effective value is never a mystery. Chat-specific bindings via /bind
+// still override this on a per-chat basis.
+const DEFAULT_CWD = resolveDir(Bun.env.OMP_DEFAULT_CWD ?? process.cwd());
 const ALLOWED = new Set(
 	(Bun.env.TELEGRAM_ALLOWED_CHATS ?? "")
 		.split(",")
@@ -550,7 +555,8 @@ process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
 log.info("boot.start", {
-	cwd: DEFAULT_CWD,
+	default_cwd: DEFAULT_CWD,
+	default_cwd_source: Bun.env.OMP_DEFAULT_CWD ? "env" : "process.cwd",
 	allowed_chats: [...ALLOWED],
 	log_file: logPath(),
 });
