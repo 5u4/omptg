@@ -374,9 +374,38 @@ bot.on("callback_query:data", async ctx => {
 	}
 });
 
+let _knownCommands: Set<string> | undefined;
+function knownCommands(): Set<string> {
+	if (!_knownCommands) {
+		_knownCommands = new Set(SLASH_COMMANDS.map(c => c.command));
+	}
+	return _knownCommands;
+}
 bot.on("message:text", async ctx => {
 	const text = ctx.message.text;
-	if (text.startsWith("/")) return;
+	if (text.startsWith("/")) {
+		// First bot_command entity at offset 0 is the command. Strip an
+		// optional `@bot` suffix that telegram clients add in groups.
+		const entities = ctx.message.entities ?? [];
+		const cmdEntity = entities.find(
+			e => e.type === "bot_command" && e.offset === 0,
+		);
+		if (!cmdEntity) return; // not actually a command, just text starting with /
+		const raw = text.slice(1, cmdEntity.length);
+		const atIdx = raw.indexOf("@");
+		const cmd = atIdx >= 0 ? raw.slice(0, atIdx) : raw;
+		// `@bot` suffix targeting another bot: not for us, ignore.
+		if (atIdx >= 0) {
+			const target = raw.slice(atIdx + 1).toLowerCase();
+			const me = ctx.me.username.toLowerCase();
+			if (target !== me) return;
+		}
+		if (knownCommands().has(cmd)) return; // real handler already ran
+		await ctx.reply(
+			`unknown command: /${cmd}\ntype /start for the list`,
+		);
+		return;
+	}
 
 	const chat = registry.get(ctx.chat.id);
 
