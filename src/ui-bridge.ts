@@ -52,6 +52,41 @@ function truncateButton(s: string, budget: number): string {
 	return s.length <= budget ? s : `${s.slice(0, budget - 1).trimEnd()}…`;
 }
 
+/**
+ * Approximate Telegram's visual button width. CJK ideographs, full-width
+ * punctuation, hiragana/katakana, hangul, and most emoji render at roughly
+ * 2× the width of an ASCII glyph; the inline-button label gets ellipsised
+ * on phones well before 60 ASCII chars when the text is CJK-heavy. Count
+ * wide code points as 2 so the long-option threshold and the truncation
+ * budget both reflect what the user actually sees.
+ */
+function visualWidth(s: string): number {
+	let w = 0;
+	for (const ch of s) {
+		const cp = ch.codePointAt(0)!;
+		w +=
+			// CJK Unified Ideographs + Ext A
+			(cp >= 0x3400 && cp <= 0x9fff) ||
+			// Hiragana, Katakana
+			(cp >= 0x3040 && cp <= 0x30ff) ||
+			// CJK symbols & punctuation, full-width forms
+			(cp >= 0x3000 && cp <= 0x303f) ||
+			(cp >= 0xff00 && cp <= 0xff60) ||
+			(cp >= 0xffe0 && cp <= 0xffe6) ||
+			// Hangul syllables
+			(cp >= 0xac00 && cp <= 0xd7a3) ||
+			// CJK Ext B–F (supplementary planes)
+			(cp >= 0x20000 && cp <= 0x2fffd) ||
+			(cp >= 0x30000 && cp <= 0x3fffd) ||
+			// Misc symbols & pictographs, emoji
+			(cp >= 0x1f300 && cp <= 0x1faff) ||
+			(cp >= 0x2600 && cp <= 0x27bf)
+				? 2
+				: 1;
+	}
+	return w;
+}
+
 export function parseCallback(
 	data: string,
 ): { requestId: string; value: string } | undefined {
@@ -146,7 +181,7 @@ export class TelegramUI implements ExtensionUIContext {
 		// the full option text, and switch buttons to short "1)" / "2)" /…
 		// labels. Short options keep the original verbatim-button UX.
 		const BUTTON_BUDGET = 60;
-		const longOptions = options.some(o => o.length > BUTTON_BUDGET);
+		const longOptions = options.some(o => visualWidth(o) > BUTTON_BUDGET);
 		if (longOptions) {
 			const preview = [
 				`❓ ${title}`,

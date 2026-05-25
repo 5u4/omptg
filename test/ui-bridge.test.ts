@@ -29,19 +29,25 @@ describe("parseCallback", () => {
 	});
 });
 
-/** Stub Bot: only `bot.api.sendMessage` is exercised by select/input. */
-function stubBot(): { bot: Bot; nextMessageId: () => number } {
+/** Stub Bot: records each sendMessage call so tests can assert on previews. */
+function stubBot(): {
+	bot: Bot;
+	nextMessageId: () => number;
+	sent: { text: string; opts: unknown }[];
+} {
 	let counter = 100;
+	const sent: { text: string; opts: unknown }[] = [];
 	const bot = {
 		api: {
-			sendMessage: async (_chatId: number, _text: string) => ({
-				message_id: ++counter,
-			}),
+			sendMessage: async (_chatId: number, text: string, opts?: unknown) => {
+				sent.push({ text, opts });
+				return { message_id: ++counter };
+			},
 			editMessageText: async () => undefined,
 			editMessageReplyMarkup: async () => undefined,
 		},
 	} as unknown as Bot;
-	return { bot, nextMessageId: () => counter };
+	return { bot, nextMessageId: () => counter, sent };
 }
 
 describe("TelegramUI.resolve", () => {
@@ -161,5 +167,40 @@ describe("TelegramUI.resolve", () => {
 			value: "cancel",
 		});
 		expect(await p2).toBeUndefined();
+	});
+});
+
+describe("TelegramUI.select preview", () => {
+	test("CJK options wider than the budget trigger a numbered preview", async () => {
+		const { bot, sent } = stubBot();
+		const ui = new TelegramUI(bot, 1);
+		// ~35 CJK code points → visual width ≈ 70, well over the 60-col budget
+		// even though `.length` is only 35.
+		const longCjk =
+			"字符上限（如三千五百字）：超过则封存当前消息，开新消息继续显示新内容";
+		const p = ui.select("活动消息上限策略？", [longCjk, "短选项"]);
+		await Promise.resolve();
+		await Promise.resolve();
+		// First send is the preview (full text), second is the keyboard carrier.
+		expect(sent[0]?.text).toContain(longCjk);
+		expect(sent[0]?.text).toContain("1)");
+		expect(sent[1]?.text).toBe("👇 pick one");
+		// Drain so the dangling promise doesn't leak.
+		const pending = ui.pending();
+		ui.resolve({ kind: "callback", requestId: pending!.requestId, value: "cancel" });
+		expect(await p).toBeUndefined();
+	});
+
+	test("short ASCII options keep the verbatim-button layout (no preview)", async () => {
+		const { bot, sent } = stubBot();
+		const ui = new TelegramUI(bot, 1);
+		const p = ui.select("pick", ["yes", "no"]);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.text).toBe("❓ pick");
+		const pending = ui.pending();
+		ui.resolve({ kind: "callback", requestId: pending!.requestId, value: "cancel" });
+		expect(await p).toBeUndefined();
 	});
 });
