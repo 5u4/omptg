@@ -84,9 +84,16 @@ interface ActivityMessage {
 	/**
 	 * Trigger function that runs the pending flush immediately (cancelling
 	 * its timer). drainHost calls this so finalize doesn't sit on the
-	 * debounce window. `null` whenever `pendingFlush` is `null`.
+	 * debounce window. Cleared as soon as `runOnce` starts.
 	 */
 	pendingFlushRun: (() => Promise<void>) | null;
+	/**
+	 * Tail of the per-host edit chain — the most recently scheduled flush
+	 * promise (resolved or not). New runs `await` this before sending
+	 * their own `editMessageText` so writes land in submission order even
+	 * when an earlier edit is stuck in autoRetry backoff.
+	 */
+	lastFlush: Promise<void> | null;
 }
 
 export class TelegramStreamer {
@@ -292,6 +299,7 @@ export class TelegramStreamer {
 				renderedText: line,
 				pendingFlush: null,
 				pendingFlushRun: null,
+				lastFlush: null,
 			};
 			this.activity = host;
 			return { host, lineIndex: 0 };
@@ -310,16 +318,20 @@ export class TelegramStreamer {
 	 * outstanding host and know the final ✅/❌ frame has landed.
 	 */
 	private scheduleFlush(host: ActivityMessage): Promise<void> {
-		// Branch on `pendingFlushRun`, not `pendingFlush`: once the timer
-		// fires `pendingFlushRun` clears immediately, but `pendingFlush`
-		// stays set until the `editMessageText` resolves. A post-timer
-		// append should NOT attach to that in-flight edit (the snapshot
-		// may already be on the wire) — it needs its own fresh debounce
-		// to guarantee delivery. Within the debounce window, however,
-		// `host.lines` mutations are picked up by the same pending run
-		// (the snapshot is taken inside `flushActivityNow`, after the
-		// timer elapses) so we can safely return the existing promise.
+		// Branch on `pendingFlushRun`: while the debounce timer is still
+		// pending, additional appends ride the same scheduled run (the
+		// snapshot is read inside `flushActivityNow` after the timer
+		// elapses, so late mutations are picked up). Once the timer fires
+		// `pendingFlushRun` clears and a post-timer append needs its own
+		// run — but to prevent out-of-order writes (the in-flight edit may
+		// be in autoRetry backoff and could land AFTER ours with a stale
+		// snapshot), the new run chains after `lastFlush` so edits land
+		// in submission order.
 		if (host.pendingFlushRun) return host.pendingFlush!;
+		// Snapshot the predecessor so this run waits for it before issuing
+		// its own edit. Captured at schedule time so a later schedule
+		// (third in the chain) sees the right tail.
+		const predecessor = host.lastFlush;
 		let runOnce: () => Promise<void>;
 		const p = new Promise<void>(resolve => {
 			let done = false;
@@ -331,19 +343,24 @@ export class TelegramStreamer {
 					clearTimeout(t);
 					this.flushHostTimers.delete(host);
 				}
-				// Null `pendingFlushRun` immediately so a concurrent append
-				// during the await opens a fresh debounce. Keep `pendingFlush`
-				// set until the edit actually settles so `finalize` / drain
-				// can await the in-flight network call rather than racing it.
+				// Null `pendingFlushRun` so a new append opens a fresh run.
+				// We deliberately keep `pendingFlush` set until our edit
+				// fully settles so drain / finalize can await it.
 				host.pendingFlushRun = null;
-				// Only count post-timer flushes as "in-flight" — pre-timer
-				// promises can be cancelled by `replaceWith` without ever
-				// resolving, and Promise.allSettled on a never-settling
-				// promise would hang.
 				this.inflightFlushes.add(p);
-				try { await this.flushActivityNow(host); }
-				finally {
-					host.pendingFlush = null;
+				try {
+					// Serialize per host: wait for the prior edit (if any)
+					// to settle before sending ours. Without this, the prior
+					// edit's autoRetry backoff could let ours land first and
+					// then be overwritten by the prior's stale snapshot.
+					if (predecessor) await predecessor.catch(() => {});
+					await this.flushActivityNow(host);
+				} finally {
+					// Identity-guard: a newer schedule may have overwritten
+					// `pendingFlush` with its own promise while we were
+					// awaiting. Don't clobber it.
+					if (host.pendingFlush === p) host.pendingFlush = null;
+					if (host.lastFlush === p) host.lastFlush = null;
 					this.inflightFlushes.delete(p);
 					resolve();
 				}
@@ -353,19 +370,21 @@ export class TelegramStreamer {
 		});
 		host.pendingFlush = p;
 		host.pendingFlushRun = runOnce!;
-
+		host.lastFlush = p;
 		return p;
 	}
 
 	/**
-	 * Fire any pending debounce timer for `host` immediately and await
-	 * the resulting flush. Safe to call when the timer has already fired
-	 * — we fall through to awaiting the in-flight `pendingFlush` promise.
+	 * Fire any pending debounce timer for `host` immediately, then await
+	 * the host's edit chain so the most recently scheduled flush has
+	 * actually landed. With per-host serialization a single host can have
+	 * multiple flushes queued; awaiting `lastFlush` (the tail) waits for
+	 * the entire chain because each link awaits its predecessor.
 	 */
 	private async drainHost(host: ActivityMessage): Promise<void> {
 		const run = host.pendingFlushRun;
 		if (run) await run();
-		else if (host.pendingFlush) await host.pendingFlush;
+		if (host.lastFlush) await host.lastFlush;
 	}
 
 	/**

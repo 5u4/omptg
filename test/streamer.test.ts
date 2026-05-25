@@ -278,4 +278,31 @@ describe("TelegramStreamer activity coalescing", () => {
 		expect(stub.sends.some(s => s.text === "error: boom")).toBe(true);
 		expect(stub.edits.length).toBe(0);
 	});
+
+	test("chained edits serialize per host so a slow first edit can't overwrite a faster second (regression)", async () => {
+		// Copilot review caught this: scheduleFlush nulls pendingFlushRun
+		// before awaiting flushActivityNow, so a post-timer append starts a
+		// fresh debounce. If the first edit was delayed (autoRetry backoff
+		// on 429), the second edit could land first and then be overwritten
+		// by the first's stale snapshot. Fix: each new flush awaits the
+		// host's lastFlush before sending its own editMessageText.
+		const stub = stubBot();
+		const s = new TelegramStreamer(stub.bot, 42);
+		const gate1 = stub.gateEdit(1); // first edit blocks
+		await s.toolStart("t1", "📖 read a.ts");
+		await s.toolStart("t2", "💻 bash: ls");
+		await Bun.sleep(300); // timer fires; runOnce A starts, blocks on gate
+		// While A is blocked, mutate state and trigger a second debounce.
+		await s.notice("late line");
+		await Bun.sleep(300); // timer for B fires
+		// B must NOT have edited yet — it's chained behind A.
+		expect(stub.edits.length).toBe(0);
+		gate1.release(); // A completes first
+		await s.flushPending();
+		// Two edits, in order: A's snapshot, then B's snapshot. B's is the
+		// authoritative final state with all three lines.
+		expect(stub.edits.length).toBe(2);
+		expect(stub.edits[0]!.text).toBe("📖 read a.ts\n💻 bash: ls");
+		expect(stub.edits[1]!.text).toBe("📖 read a.ts\n💻 bash: ls\nlate line");
+	});
 });
