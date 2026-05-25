@@ -529,7 +529,7 @@ async function dispatchVoiceText(
 ): Promise<void> {
 	const chat = registry.get(chatId, threadId);
 	try {
-		if (chat.isStreaming) {
+		if (chat.isTurnActive) {
 			await bot.api.sendMessage(chatId, "↪ steered (/cancel to abort)", {
 				disable_notification: true,
 				reply_parameters: { message_id: replyTo },
@@ -776,7 +776,7 @@ bot.on("message:photo", async ctx => {
 				caption || "(no caption — describe or ask what they want)",
 			].join("\n");
 
-			if (chat.isStreaming) {
+			if (chat.isTurnActive) {
 				await ctx.reply("↪ steered (/cancel to abort)", {
 					disable_notification: true,
 					reply_parameters: { message_id: replyTo },
@@ -932,7 +932,7 @@ bot.on("message:text", async ctx => {
 			// If a turn is already running, sending another message routes
 			// through session.steer() (LLM sees it mid-turn). Ack so the
 			// user knows it landed — silent push, with the escape hatch.
-			if (chat.isStreaming) {
+			if (chat.isTurnActive) {
 				await ctx.reply("↪ steered (/cancel to abort)", {
 					disable_notification: true,
 					reply_parameters: { message_id: ctx.message.message_id },

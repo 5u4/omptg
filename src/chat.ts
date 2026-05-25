@@ -194,6 +194,18 @@ export class ChatSession {
 		return this.session?.isStreaming ?? false;
 	}
 
+	/** True from the moment we dispatch a user turn until `agent_end`
+	 *  (or abort/endTurn) fires. Reflects "is the user still waiting on
+	 *  the LLM?", not the SDK's `isStreaming` — which stays true through
+	 *  post-stream deferred work (persistence, mental-models refresh,
+	 *  auto-compaction). Using the SDK flag for the "↪ steered" ack
+	 *  caused stale acks on the user's next message after the reply
+	 *  had already landed. */
+	private turnActive = false;
+	get isTurnActive(): boolean {
+		return this.turnActive;
+	}
+
 	/**
 	 * Return existing session, or — on the very first ensure() of a chat's
 	 * lifetime — try to resume the most recent stored session in this cwd
@@ -339,6 +351,7 @@ export class ChatSession {
 		if (this.firstUserText === undefined) this.firstUserText = text;
 		this.streamer = new TelegramStreamer(this.bot, this.chatId, opts?.replyTo, this.threadId);
 		this.typing.start();
+		this.turnActive = true;
 		if (s.isStreaming) {
 			await s.steer(text, opts?.images);
 		} else {
@@ -351,6 +364,7 @@ export class ChatSession {
 		if (!this.session?.isStreaming) return false;
 		await this.session.abort();
 		this.typing.stop();
+		this.turnActive = false;
 		return true;
 	}
 
@@ -359,6 +373,7 @@ export class ChatSession {
 	 *  reply even if the agent produced none). Idempotent. */
 	async endTurn(): Promise<void> {
 		this.typing.stop();
+		this.turnActive = false;
 		// Belt + suspenders: if agent_end never fired (crash, abort, etc.)
 		// the pending assistant text would otherwise be lost. Flush it here
 		// as the final reply so the user still sees something.
@@ -441,6 +456,7 @@ export class ChatSession {
 			}
 			case "agent_end": {
 				this.typing.stop();
+				this.turnActive = false;
 				// Whatever's still pending is the final assistant reply.
 				const final = this.pendingAssistantText;
 				this.pendingAssistantText = undefined;
