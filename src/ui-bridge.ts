@@ -169,12 +169,15 @@ export class TelegramUI implements ExtensionUIContext {
 		const requestId = freshId();
 		this.log.info("select.fire", { req_id: requestId, title, n_options: options.length });
 
-		// Telegram inline-button text is capped (~64 chars before truncation
-		// shows ellipsis and hides the tail). If any option would overflow,
-		// post a numbered preview as a regular message so the user can read
-		// the full option text, and switch buttons to short "1)" / "2)" /…
-		// labels. Short options keep the original verbatim-button UX.
-		const BUTTON_BUDGET = 60;
+		// Telegram's hard cap on inline-button text is ~64 chars, but on phones
+		// labels get ellipsised well before that — especially for CJK/emoji,
+		// which render at roughly 2× the width of ASCII. We use `visualWidth`
+		// (CJK + wide punctuation + most emoji counted as 2) and a conservative
+		// 20-column budget so anything that would visibly truncate on a phone
+		// triggers a full numbered preview as a regular message, with the
+		// buttons switched to short "1)" / "2)" /… labels. Short options keep
+		// the original verbatim-button UX.
+		const BUTTON_BUDGET = 20;
 		const longOptions = options.some(o => visualWidth(o) > BUTTON_BUDGET);
 		if (longOptions) {
 			const preview = [
