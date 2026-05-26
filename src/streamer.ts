@@ -277,6 +277,12 @@ export class TelegramStreamer {
 			? errorLine || withResultIcon(current, "❌")
 			: withResultIcon(current, "✅");
 		if (next === current) return;
+		// Maintain the `charCount === sum(non-empty lengths) + max(0, N-1)`
+		// invariant. The success path's withResultIcon is length-preserving
+		// (or off by 1 byte at most), but `errorLine` can be much longer
+		// than the original tool-start line and unaccounted growth would
+		// under-count the cap on subsequent appends.
+		entry.host.charCount += next.length - current.length;
 		entry.host.lines[entry.lineIndex] = next;
 		this.scheduleFlush(entry.host);
 	}

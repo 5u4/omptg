@@ -472,4 +472,34 @@ describe("TelegramStreamer subagent cross-host regressions", () => {
 		expect(landedOnA).toBe(true);
 		expect(sends.length).toBe(1);
 	});
+
+	test("toolEnd updates charCount so a longer error line is reflected in cap math", async () => {
+		// Regression: toolEnd used to swap host.lines[i] without adjusting
+		// charCount, so an `❌ tool failed: <80-char detail>` replacing a
+		// short `💻 bash: ls` would silently under-count the cap. Probe by
+		// stuffing the host near cap with short tool-start lines, swapping
+		// each to a long error line, then trying to append one more line
+		// that would clearly overflow if charCount tracked actual content.
+		const { bot, sends, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		// 20 tool starts at ~14 chars each → ~280 chars before any errors.
+		for (let i = 0; i < 20; i++) {
+			await s.toolStart(`t${i}`, `💻 bash: cmd${i}`);
+		}
+		// Each errorLine adds ~140 chars → total grows by ~2520 chars.
+		const longErr = "❌ bash failed: " + "x".repeat(120);
+		for (let i = 0; i < 20; i++) {
+			await s.toolEnd(`t${i}`, true, longErr);
+		}
+		await s.flushPending();
+		// 20 × ~136 = ~2720 chars + 19 newlines = ~2739 used. A 1000-char
+		// append should now overflow ACTIVITY_CHAR_CAP (3500) and seal the
+		// host. Pre-fix, the bogus charCount would mistakenly admit it.
+		await s.notice("y".repeat(1000));
+		await s.flushPending();
+		// Two activity messages = host A sealed, host B opened with the
+		// big notice. The fix is what makes this happen.
+		expect(sends.length).toBe(2);
+		expect(sends[1]!.text.startsWith("y")).toBe(true);
+	});
 });
