@@ -577,12 +577,11 @@ export class ChatSession {
 					const keys = this.activeTask.keys.slice();
 					this.activeTask = undefined;
 					if (keys.length > 0) {
-						// Enqueued AFTER `s.toolEnd` above, so chain order
-						// is: `🤖 task → N` becomes `✅ task → N` first,
-						// then the subagent rows tombstone. The user sees
-						// the parent ✅ tick land before the block clears —
-						// reads as "task finished, cleaning up" rather
-						// than "rows vanished, then a confirmation".
+						// Enqueued AFTER `s.toolEnd` above so the parent
+						// task's toolEnd settles before the subagent
+						// rows tombstone. On success the `🤖 task → N`
+						// line stays as-is; the user just sees the
+						// subagent block clear out underneath it.
 						s.enqueue(async () => { s.subagentCollapse(keys); });
 					}
 				}
