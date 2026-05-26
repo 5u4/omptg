@@ -85,6 +85,15 @@ function recomputeCharCount(lines: readonly string[]): number {
 	return nonEmpty > 0 ? sum + (nonEmpty - 1) : 0;
 }
 
+/** Tombstones (`""`) are filtered at render and shouldn't count toward
+ *  `ACTIVITY_LINE_CAP`. Kept as a free function so cap-check sites
+ *  don't reach into `host.lines` arithmetic inline. */
+function countNonEmptyLines(lines: readonly string[]): number {
+	let n = 0;
+	for (const l of lines) if (l !== "") n++;
+	return n;
+}
+
 /**
  * Tracking state for a single rolling activity message. `lines` is the
  * authoritative buffer; `renderedText` is what we last sent to telegram
@@ -384,16 +393,24 @@ export class TelegramStreamer {
 		line: string,
 	): Promise<{ host: ActivityMessage; lineIndex: number } | null> {
 		const cur = this.activity;
-		// `+1` covers the newline join. Seal & start fresh when the new
-		// line would tip either cap.
+		// Cap checks count *non-empty* lines only: `subagentCollapse`
+		// leaves tombstoned slots in the array to keep `toolMsgs`
+		// lineIndex references stable, but those rows are filtered at
+		// render time and shouldn't eat the cap budget that drives
+		// seal-and-reopen decisions.
+		const curNonEmpty = cur ? countNonEmptyLines(cur.lines) : 0;
 		const wouldOverflow = cur !== null && (
-			cur.lines.length + 1 > ACTIVITY_LINE_CAP ||
+			curNonEmpty + 1 > ACTIVITY_LINE_CAP ||
 			cur.charCount + 1 + line.length > ACTIVITY_CHAR_CAP
 		);
 		if (cur && !wouldOverflow) {
 			const lineIndex = cur.lines.length;
 			cur.lines.push(line);
-			cur.charCount += 1 + line.length;
+			// `+1` is the newline join cost; only add it if there was
+			// already at least one visible line. With `recomputeCharCount`
+			// keeping `charCount` accurate after collapses, this preserves
+			// the invariant `charCount === sum(non-empty lengths) + max(0, N-1)`.
+			cur.charCount += line.length + (curNonEmpty > 0 ? 1 : 0);
 			this.scheduleFlush(cur);
 			return { host: cur, lineIndex };
 		}
@@ -529,7 +546,12 @@ export class TelegramStreamer {
 	 */
 	private async flushActivityNow(host: ActivityMessage): Promise<void> {
 		const text = host.lines.filter(l => l !== "").join("\n");
-		if (text === host.renderedText) return;
+		// Telegram rejects empty editMessageText. Unreachable today
+		// (collapse only runs after a parent `task` tool whose own line
+		// survives at index 0), but a future caller that tombstones every
+		// row would otherwise loop in autoRetry forever. Treat empty as
+		// "already in sync" so the chat keeps its last rendered frame.
+		if (text === host.renderedText || text === "") return;
 		try {
 			await this.bot.api.editMessageText(this.chatId, host.messageId, text, {
 				// URL-containing lines (bash: curl …, read https://…) would

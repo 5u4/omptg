@@ -577,11 +577,12 @@ export class ChatSession {
 					const keys = this.activeTask.keys.slice();
 					this.activeTask = undefined;
 					if (keys.length > 0) {
-						// Collapse runs through the streamer chain so it
-						// lands AFTER the toolStart line was actually
-						// appended (and before the toolEnd icon swap
-						// renders, which is the same `s.toolEnd` above —
-						// chain order is preserved).
+						// Enqueued AFTER `s.toolEnd` above, so chain order
+						// is: `🤖 task → N` becomes `✅ task → N` first,
+						// then the subagent rows tombstone. The user sees
+						// the parent ✅ tick land before the block clears —
+						// reads as "task finished, cleaning up" rather
+						// than "rows vanished, then a confirmation".
 						s.enqueue(async () => { s.subagentCollapse(keys); });
 					}
 				}
