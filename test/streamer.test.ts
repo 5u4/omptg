@@ -306,3 +306,200 @@ describe("TelegramStreamer activity coalescing", () => {
 		expect(stub.edits[1]!.text).toBe("📖 read a.ts\n💻 bash: ls\nlate line");
 	});
 });
+
+describe("TelegramStreamer subagent slots", () => {
+	test("subagentLine appends first time, replaces in place on subsequent calls", async () => {
+		const { bot, sends, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t-task", "🤖 task → 2 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts  · 1 tools");
+		await s.subagentLine("k1", "  └ [1] explore  🔍 search /foo/  · 2 tools");
+		await s.subagentLine("k0", "  └ [0] explore  💻 bash: ls  · 3 tools"); // replace
+		await s.flushPending();
+		expect(sends.length).toBe(1);
+		expect(edits.length).toBeGreaterThanOrEqual(1);
+		const finalText = edits[edits.length - 1]!.text;
+		const lines = finalText.split("\n");
+		expect(lines.length).toBe(3); // task + 2 subagent rows; row 0 replaced not appended
+		expect(lines[1]).toContain("💻 bash: ls");
+		expect(lines[2]).toContain("search /foo/");
+	});
+
+	test("subagentLine no-op when called with identical text (no extra edit)", async () => {
+		const { bot, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t", "🤖 task → 1 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		await s.flushPending();
+		const editsBefore = edits.length;
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts"); // same
+		await s.flushPending();
+		expect(edits.length).toBe(editsBefore);
+	});
+
+	test("subagentCollapse tombstones registered slots and frees their cap budget", async () => {
+		const { bot, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t-task", "🤖 task → 2 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		await s.subagentLine("k1", "  └ [1] explore  🔍 search /x/");
+		await s.flushPending();
+		s.subagentCollapse(["k0", "k1"]);
+		await s.flushPending();
+		const finalText = edits[edits.length - 1]!.text;
+		// Subagent rows gone; only the parent task line remains.
+		expect(finalText).toBe("🤖 task → 2 × explore");
+	});
+
+	test("subagentCollapse preserves toolEnd line-index references for later tools", async () => {
+		// Regression: collapse must not delete array slots or it shifts the
+		// lineIndex of any later tool start line, sending toolEnd to the
+		// wrong row.
+		const { bot, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t-task", "🤖 task → 1 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		await s.toolEnd("t-task", false, undefined); // task tool finished
+		s.subagentCollapse(["k0"]);
+		await s.toolStart("t-next", "📖 read b.ts");
+		await s.toolEnd("t-next", false, undefined);
+		await s.flushPending();
+		const finalText = edits[edits.length - 1]!.text;
+		const lines = finalText.split("\n");
+		expect(lines).toEqual([
+			"✅ task → 1 × explore",
+			"✅ read b.ts",
+		]);
+	});
+
+	test("subagentLine after collapse does not resurrect a tombstoned slot", async () => {
+		const { bot, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t", "🤖 task → 1 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		await s.flushPending();
+		s.subagentCollapse(["k0"]);
+		await s.flushPending();
+		await s.subagentLine("k0", "  └ [0] explore  💻 LATE");
+		await s.flushPending();
+		const finalText = edits[edits.length - 1]!.text;
+		expect(finalText).toBe("🤖 task → 1 × explore");
+	});
+});
+
+describe("TelegramStreamer subagent cross-host regressions", () => {
+	test("subagentCollapse follows the slot to its original host after a seal", async () => {
+		// Open host A, register a subagent slot on it, then force a cap
+		// overflow so host B opens. Collapse must mutate host A (where the
+		// subagent row actually lives), NOT silent no-op against host B.
+		const { bot, sends, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t-task", "🤖 task → 1 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		// Push past ACTIVITY_LINE_CAP (25) so the next append seals A.
+		for (let i = 0; i < 25; i++) await s.notice(`note ${i}`);
+		await s.flushPending();
+		expect(sends.length).toBe(2); // A sealed, B opened
+		const hostAId = sends[0]!.messageId;
+		const hostBId = sends[1]!.messageId;
+		s.subagentCollapse(["k0"]);
+		await s.flushPending();
+		// Find the most recent edit to host A — it should have the subagent
+		// row tombstoned (so the rendered text no longer contains it).
+		const aEdits = edits.filter(e => e.messageId === hostAId);
+		const finalAText = aEdits[aEdits.length - 1]!.text;
+		expect(finalAText).not.toContain("[0] explore");
+		// Host B is unaffected.
+		const bEdits = edits.filter(e => e.messageId === hostBId);
+		if (bEdits.length > 0) {
+			expect(bEdits[bEdits.length - 1]!.text).not.toContain("[0] explore");
+		}
+	});
+
+	test("subagentLine continues updating the original host after a seal (replace-in-place across seal)", async () => {
+		const { bot, sends, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t-task", "🤖 task → 1 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		for (let i = 0; i < 25; i++) await s.notice(`note ${i}`);
+		await s.flushPending();
+		const hostAId = sends[0]!.messageId;
+		// Late progress update for the slot that lives on A. Must rewrite
+		// the row on A in place; NOT append a fresh row to B.
+		await s.subagentLine("k0", "  └ [0] explore  💻 LATE");
+		await s.flushPending();
+		const aEdits = edits.filter(e => e.messageId === hostAId);
+		const finalAText = aEdits[aEdits.length - 1]!.text;
+		expect(finalAText).toContain("💻 LATE");
+		expect(finalAText).not.toContain("📖 read a.ts"); // replaced
+		// B must not have grown a stray subagent row.
+		const bSend = sends[1]!;
+		const bEdits = edits.filter(e => e.messageId === bSend.messageId);
+		const finalB = bEdits.length > 0 ? bEdits[bEdits.length - 1]!.text : bSend.text;
+		expect(finalB).not.toContain("[0] explore");
+	});
+
+	test("post-collapse cap math still admits a near-cap append into the now-empty host", async () => {
+		// Activity message starts fresh with a subagent row at index 0
+		// (e.g. main agent had no recent activity when progress arrived).
+		// Arithmetic decrement of `text.length + 1` would dip charCount
+		// negative; recomputeCharCount must clamp at 0. Symmetrically,
+		// the cap check has to use the conditional newline-join cost so
+		// a near-cap append after collapse doesn't falsely overflow.
+		const { bot, sends, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		await s.flushPending();
+		const hostAId = sends[0]!.messageId;
+		s.subagentCollapse(["k0"]);
+		await s.flushPending();
+		// 3000 chars < ACTIVITY_CHAR_CAP (3500), well within budget for an
+		// empty host. With correct cap math this edits the existing host;
+		// a regression that mis-counts a phantom newline would seal A and
+		// open B with the big line as a fresh send.
+		const big = "x".repeat(3000);
+		await s.notice(big);
+		await s.flushPending();
+		// Hard invariant: the big line must appear somewhere — either the
+		// last edit on host A, or a fresh send if the host was sealed.
+		const aEdits = edits.filter(e => e.messageId === hostAId);
+		const aLast = aEdits.length > 0 ? aEdits[aEdits.length - 1]!.text : "";
+		const landedOnA = aLast.includes(big);
+		const landedOnNewSend = sends.slice(1).some(s => s.text.includes(big));
+		expect(landedOnA || landedOnNewSend).toBe(true);
+		// Stronger invariant: with correct cap math, A wasn't sealed —
+		// the big line landed on A, not a fresh send.
+		expect(landedOnA).toBe(true);
+		expect(sends.length).toBe(1);
+	});
+
+	test("toolEnd updates charCount so a longer error line is reflected in cap math", async () => {
+		// Regression: toolEnd used to swap host.lines[i] without adjusting
+		// charCount, so an `❌ tool failed: <80-char detail>` replacing a
+		// short `💻 bash: ls` would silently under-count the cap. Probe by
+		// stuffing the host near cap with short tool-start lines, swapping
+		// each to a long error line, then trying to append one more line
+		// that would clearly overflow if charCount tracked actual content.
+		const { bot, sends, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		// 20 tool starts at ~14 chars each → ~280 chars before any errors.
+		for (let i = 0; i < 20; i++) {
+			await s.toolStart(`t${i}`, `💻 bash: cmd${i}`);
+		}
+		// Each errorLine adds ~140 chars → total grows by ~2520 chars.
+		const longErr = "❌ bash failed: " + "x".repeat(120);
+		for (let i = 0; i < 20; i++) {
+			await s.toolEnd(`t${i}`, true, longErr);
+		}
+		await s.flushPending();
+		// 20 × ~136 = ~2720 chars + 19 newlines = ~2739 used. A 1000-char
+		// append should now overflow ACTIVITY_CHAR_CAP (3500) and seal the
+		// host. Pre-fix, the bogus charCount would mistakenly admit it.
+		await s.notice("y".repeat(1000));
+		await s.flushPending();
+		// Two activity messages = host A sealed, host B opened with the
+		// big notice. The fix is what makes this happen.
+		expect(sends.length).toBe(2);
+		expect(sends[1]!.text.startsWith("y")).toBe(true);
+	});
+});

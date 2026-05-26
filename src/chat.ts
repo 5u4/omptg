@@ -25,7 +25,14 @@ import { TelegramUI, type PendingUiRequest } from "./ui-bridge.ts";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { scoped } from "./logger.ts";
 import { ChatStore } from "./chat-store.ts";
-import { renderToolStart, renderToolEnd } from "./tool-render.ts";
+import { renderToolStart, renderToolEnd, renderSubagentProgress } from "./tool-render.ts";
+import {
+	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+	TASK_SUBAGENT_PROGRESS_CHANNEL,
+	type SubagentLifecyclePayload,
+	type SubagentProgressPayload,
+} from "@oh-my-pi/pi-coding-agent/task/types";
+import type { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 export interface ChatSessionOptions {
 	chatId: number;
@@ -162,6 +169,35 @@ export class ChatSession {
 	private pendingAssistantText: string | undefined;
 
 	/**
+	 * EventBus from the active `createAgentSession`. Used to subscribe to
+	 * `task:subagent:*` channels so the streamer can render per-subagent
+	 * progress rows under the parent `🤖 task` line. `attach()` populates,
+	 * `dispose()` runs the returned unsubscribers. Per-session because
+	 * each createAgentSession returns its own bus.
+	 */
+	private eventBus: EventBus | undefined;
+	private busUnsubscribers: Array<() => void> = [];
+	/**
+	 * State of the currently in-flight `task` tool call. Set on its
+	 * `tool_execution_start`, cleared (and its subagent rows collapsed)
+	 * on `tool_execution_end`. The main agent serializes tool calls so
+	 * at most one parent `task` is active at a time; subagents spawned
+	 * by subagents emit on their own bus and never reach this handler.
+	 */
+	private activeTask: {
+		toolCallId: string;
+		/** Streamer keys we've registered for collapse on task end. */
+		keys: string[];
+		/** index → display description from the original `tasks[]` arg,
+		 *  used when a progress payload's `task` text is empty. */
+		labels: Map<number, { agent: string; description: string }>;
+		/** Indexes whose lifecycle reported terminal status — late
+		 *  progress events for them are dropped so completed rows don't
+		 *  flicker back to a "running" state. */
+		done: Set<number>;
+	} | undefined;
+
+	/**
 	 * Cache of the last `/sessions` listing, so `/resume <n>` resolves
 	 * the 1-based index the user saw. Per-ChatSession (not per-chat-id)
 	 * so a forum group's topic A and topic B don't share the cache.
@@ -260,7 +296,7 @@ export class ChatSession {
 				systemPrompt: withTelegramPrompt,
 			});
 			this.cwd = manager.getCwd();
-			this.attach(created.session, created.setToolUIContext);
+			this.attach(created.session, created.setToolUIContext, created.eventBus);
 			this.log.info("session.auto_resumed", {
 				session_id: created.session.sessionId,
 				path: newest.path,
@@ -297,7 +333,7 @@ export class ChatSession {
 				systemPrompt: withTelegramPrompt,
 			});
 		this.cwd = manager.getCwd();
-		this.attach(created.session, created.setToolUIContext);
+		this.attach(created.session, created.setToolUIContext, created.eventBus);
 		return created.session;
 	}
 
@@ -305,6 +341,14 @@ export class ChatSession {
 		this.unsubscribe?.();
 		this.typing.stop();
 		this.unsubscribe = undefined;
+		for (const unsub of this.busUnsubscribers) {
+			try { unsub(); } catch (err) {
+				this.log.warn("dispose.bus_unsubscribe_failed", { err: String(err) });
+			}
+		}
+		this.busUnsubscribers = [];
+		this.eventBus = undefined;
+		this.activeTask = undefined;
 		if (this.session) {
 			try {
 				await this.session.dispose();
@@ -348,18 +392,37 @@ export class ChatSession {
 				`[chat ${this.chatId}] ${created.modelFallbackMessage}`,
 			);
 		}
-		this.attach(created.session, created.setToolUIContext);
+		this.attach(created.session, created.setToolUIContext, created.eventBus);
 		return created.session;
 	}
 
 	private attach(
 		session: AgentSession,
 		setToolUIContext: (ctx: TelegramUI, hasUI: boolean) => void,
+		eventBus: EventBus | undefined,
 	): void {
 		this.session = session;
 		// Inject our telegram-backed UI before any tool can call into it.
 		setToolUIContext(this.ui, true);
 		this.unsubscribe = session.subscribe(e => this.handleEvent(e));
+		this.eventBus = eventBus;
+		if (eventBus) {
+			// Two channels are enough:
+			//   - lifecycle: terminal status (so we stop pushing progress)
+			//   - progress: 150ms-coalesced snapshot; everything we render
+			//               comes from `AgentProgress` directly
+			// We deliberately skip TASK_SUBAGENT_EVENT_CHANNEL (raw per-event
+			// firehose): it's noisy, every visible field is already in
+			// `AgentProgress.currentTool*` / `lastIntent` / `toolCount`.
+			this.busUnsubscribers.push(
+				eventBus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, data => {
+					this.handleSubagentProgress(data as SubagentProgressPayload);
+				}),
+				eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+					this.handleSubagentLifecycle(data as SubagentLifecyclePayload);
+				}),
+			);
+		}
 		// Resuming a session preloads sessionName; don't try to generate again.
 		this.titleAttempted = Boolean(session.sessionName);
 		this.firstUserText = undefined;
@@ -478,6 +541,22 @@ export class ChatSession {
 					if (pre) await s.commitPreamble(pre);
 					await s.toolStart(id, line);
 				});
+				if (ev.toolName === "task") {
+					// Capture the tasks[] array so subagent progress can be
+					// labeled with the user-visible description even when the
+					// progress payload's `task` text is empty.
+					const args = (ev.args ?? {}) as { agent?: string; tasks?: unknown };
+					const items = Array.isArray(args.tasks) ? args.tasks : [];
+					const agent = typeof args.agent === "string" ? args.agent : "agent";
+					const labels = new Map<number, { agent: string; description: string }>();
+					items.forEach((t, i) => {
+						const desc = t && typeof t === "object" && typeof (t as { description?: unknown }).description === "string"
+							? (t as { description: string }).description
+							: "";
+						labels.set(i, { agent, description: desc });
+					});
+					this.activeTask = { toolCallId: id, keys: [], labels, done: new Set() };
+				}
 				break;
 			}
 			case "tool_execution_end": {
@@ -494,6 +573,19 @@ export class ChatSession {
 					: undefined;
 				const toolCallId = ev.toolCallId;
 				s.enqueue(() => s.toolEnd(toolCallId, isError, errorLine));
+				if (ev.toolName === "task" && this.activeTask?.toolCallId === toolCallId) {
+					const keys = this.activeTask.keys.slice();
+					this.activeTask = undefined;
+					if (keys.length > 0) {
+						// Enqueued AFTER `s.toolEnd` above, so chain order
+						// is: `🤖 task → N` becomes `✅ task → N` first,
+						// then the subagent rows tombstone. The user sees
+						// the parent ✅ tick land before the block clears —
+						// reads as "task finished, cleaning up" rather
+						// than "rows vanished, then a confirmation".
+						s.enqueue(async () => { s.subagentCollapse(keys); });
+					}
+				}
 				break;
 			}
 			case "notice": {
@@ -519,6 +611,56 @@ export class ChatSession {
 			default:
 				break;
 		}
+	}
+
+	/**
+	 * Stream a subagent's progress snapshot into the activity message as a
+	 * keyed row. Called from the EventBus subscription; harness already
+	 * coalesces at 150ms so the firehose is manageable. The streamer's
+	 * own 250ms debounce further collapses concurrent subagents into a
+	 * single editMessageText.
+	 *
+	 * Drops events when:
+	 *   - no active task call captured (event from a stale session, or
+	 *     racy emit after we collapsed)
+	 *   - the slot already reached a terminal lifecycle state (avoids
+	 *     resurrecting a completed row with a late progress snapshot)
+	 *   - the streamer has been finalized
+	 */
+	private handleSubagentProgress(payload: SubagentProgressPayload): void {
+		const active = this.activeTask;
+		const s = this.streamer;
+		if (!active || !s) return;
+		const { index, progress } = payload;
+		if (active.done.has(index)) return;
+		const label = active.labels.get(index);
+		const description = label?.description || payload.task || "";
+		const agent = label?.agent || payload.agent;
+		const line = renderSubagentProgress(
+			index,
+			agent,
+			description,
+			progress.currentTool,
+			progress.currentToolArgs,
+			progress.lastIntent,
+			progress.toolCount,
+		);
+		const key = `${active.toolCallId}#${index}`;
+		if (!active.keys.includes(key)) active.keys.push(key);
+		s.enqueue(() => s.subagentLine(key, line));
+	}
+
+	/**
+	 * Terminal-state notifier. We don't render a final row (A-mode: the
+	 * whole block collapses when the parent task ends), but we DO mark
+	 * the slot as done so any in-flight late `progress` events can't
+	 * write back to it after `subagentDone` fires.
+	 */
+	private handleSubagentLifecycle(payload: SubagentLifecyclePayload): void {
+		if (payload.status === "started") return;
+		const active = this.activeTask;
+		if (!active) return;
+		active.done.add(payload.index);
 	}
 
 	/** Fire-and-forget title generation after the first agent turn.

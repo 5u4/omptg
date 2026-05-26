@@ -64,6 +64,37 @@ function withResultIcon(startLine: string, icon: "✅" | "❌"): string {
 }
 
 /**
+ * Recompute `host.charCount` from the `lines` array. Mirrors the
+ * invariant maintained by `appendActivityLine`: charCount equals the
+ * sum of non-empty line lengths plus one newline per join between
+ * surviving lines.
+ *
+ * Used by `subagentCollapse` instead of arithmetic decrements because
+ * the per-line decrement (`text.length + 1`) over-counts the very first
+ * line (no leading newline) and could drive `charCount` negative when a
+ * fresh host's first line is a tombstoned subagent slot.
+ */
+function recomputeCharCount(lines: readonly string[]): number {
+	let sum = 0;
+	let nonEmpty = 0;
+	for (const l of lines) {
+		if (l === "") continue;
+		sum += l.length;
+		nonEmpty++;
+	}
+	return nonEmpty > 0 ? sum + (nonEmpty - 1) : 0;
+}
+
+/** Tombstones (`""`) are filtered at render and shouldn't count toward
+ *  `ACTIVITY_LINE_CAP`. Kept as a free function so cap-check sites
+ *  don't reach into `host.lines` arithmetic inline. */
+function countNonEmptyLines(lines: readonly string[]): number {
+	let n = 0;
+	for (const l of lines) if (l !== "") n++;
+	return n;
+}
+
+/**
  * Tracking state for a single rolling activity message. `lines` is the
  * authoritative buffer; `renderedText` is what we last sent to telegram
  * so we can skip edits that wouldn't change anything (avoids "message
@@ -113,6 +144,22 @@ export class TelegramStreamer {
 	 * still fine (telegram allows edits for ~48h).
 	 */
 	private readonly toolMsgs = new Map<string, { host: ActivityMessage; lineIndex: number }>();
+	/**
+	 * Subagent slot registry: streamer-scoped (not per-host) so a slot
+	 * that was opened on host A survives a cap-overflow seal and is still
+	 * locatable when `subagentCollapse` runs after host B has opened.
+	 * Without this, collapse would silently miss every slot stranded on
+	 * the sealed predecessor and leave orphan rows in the chat scrollback.
+	 *
+	 * `tombstoned` blocks resurrection: once `subagentCollapse` clears a
+	 * slot, late progress events for that key get dropped instead of
+	 * appending a fresh row.
+	 */
+	private readonly subagentSlots = new Map<string, {
+		host: ActivityMessage;
+		lineIndex: number;
+		tombstoned: boolean;
+	}>();
 	private finalized = false;
 	private readonly log = scoped("streamer");
 	/**
@@ -230,6 +277,12 @@ export class TelegramStreamer {
 			? errorLine || withResultIcon(current, "❌")
 			: withResultIcon(current, "✅");
 		if (next === current) return;
+		// Maintain the `charCount === sum(non-empty lengths) + max(0, N-1)`
+		// invariant. The success path's withResultIcon is length-preserving
+		// (or off by 1 byte at most), but `errorLine` can be much longer
+		// than the original tool-start line and unaccounted growth would
+		// under-count the cap on subsequent appends.
+		entry.host.charCount += next.length - current.length;
 		entry.host.lines[entry.lineIndex] = next;
 		this.scheduleFlush(entry.host);
 	}
@@ -261,6 +314,82 @@ export class TelegramStreamer {
 	}
 
 	/**
+	 * Render or replace a keyed "subagent status" line. First call for a
+	 * given key appends a line to the current activity message and
+	 * registers the slot in `subagentSlots`; subsequent calls rewrite
+	 * that line in place on the *original* host — even if the active
+	 * message has since been sealed and replaced.
+	 *
+	 * Used by the `task:subagent:progress` bridge: 3 parallel subagents
+	 * emitting ~10Hz progress each collapse into 3 stable rows that
+	 * tick in place rather than 30+ append events that would seal the
+	 * activity message in seconds.
+	 *
+	 * If the slot was tombstoned by `subagentCollapse`, the call is
+	 * dropped — late progress events can't resurrect a slot.
+	 */
+	async subagentLine(key: string, line: string): Promise<void> {
+		if (this.finalized || !line) return;
+		const slot = this.subagentSlots.get(key);
+		if (slot) {
+			if (slot.tombstoned) return;
+			const host = slot.host;
+			const current = host.lines[slot.lineIndex];
+			if (current === undefined || current === line) return;
+			host.charCount += line.length - current.length;
+			host.lines[slot.lineIndex] = line;
+			this.scheduleFlush(host);
+			return;
+		}
+		const placement = await this.appendActivityLine(line);
+		if (placement) {
+			this.subagentSlots.set(key, {
+				host: placement.host,
+				lineIndex: placement.lineIndex,
+				tombstoned: false,
+			});
+		}
+	}
+
+	/**
+	 * Collapse a group of keyed slots: tombstone every line and free its
+	 * char/line budget. Called from the parent `task` tool_execution_end
+	 * so the activity message reverts to just the `✅ task → N × …` row
+	 * and gives cap budget back for subsequent main-agent events.
+	 *
+	 * Slots may live on different hosts (some sealed) when the parent
+	 * task straddled a cap overflow. We walk each slot to its own host
+	 * and recompute that host's `charCount` from scratch — arithmetic
+	 * decrement is fragile at the first-line edge (no leading newline
+	 * cost) and recompute is O(N) over ≤25 lines, which is free.
+	 *
+	 * Tombstoned slots stay in `host.lines` as `""` so existing
+	 * `toolMsgs` lineIndex references on the same host remain valid;
+	 * `flushActivityNow` filters empties at render time.
+	 */
+	subagentCollapse(keys: readonly string[]): void {
+		if (this.finalized || keys.length === 0) return;
+		const dirtyHosts = new Set<ActivityMessage>();
+		for (const key of keys) {
+			const slot = this.subagentSlots.get(key);
+			if (!slot || slot.tombstoned) continue;
+			const host = slot.host;
+			const text = host.lines[slot.lineIndex];
+			if (text === undefined || text === "") {
+				slot.tombstoned = true;
+				continue;
+			}
+			host.lines[slot.lineIndex] = "";
+			slot.tombstoned = true;
+			dirtyHosts.add(host);
+		}
+		for (const host of dirtyHosts) {
+			host.charCount = recomputeCharCount(host.lines);
+			this.scheduleFlush(host);
+		}
+	}
+
+	/**
 	 * Append `line` to the current rolling activity message, sealing and
 	 * opening a fresh one if the addition would breach either cap. Returns
 	 * the host + line index so callers (toolStart) can edit the line later.
@@ -270,16 +399,24 @@ export class TelegramStreamer {
 		line: string,
 	): Promise<{ host: ActivityMessage; lineIndex: number } | null> {
 		const cur = this.activity;
-		// `+1` covers the newline join. Seal & start fresh when the new
-		// line would tip either cap.
+		// Cap checks count *non-empty* lines only: `subagentCollapse`
+		// leaves tombstoned slots in the array to keep `toolMsgs`
+		// lineIndex references stable, but those rows are filtered at
+		// render time and shouldn't eat the cap budget that drives
+		// seal-and-reopen decisions.
+		const curNonEmpty = cur ? countNonEmptyLines(cur.lines) : 0;
 		const wouldOverflow = cur !== null && (
-			cur.lines.length + 1 > ACTIVITY_LINE_CAP ||
-			cur.charCount + 1 + line.length > ACTIVITY_CHAR_CAP
+			curNonEmpty + 1 > ACTIVITY_LINE_CAP ||
+			cur.charCount + line.length + (curNonEmpty > 0 ? 1 : 0) > ACTIVITY_CHAR_CAP
 		);
 		if (cur && !wouldOverflow) {
 			const lineIndex = cur.lines.length;
 			cur.lines.push(line);
-			cur.charCount += 1 + line.length;
+			// `+1` is the newline join cost; only add it if there was
+			// already at least one visible line. With `recomputeCharCount`
+			// keeping `charCount` accurate after collapses, this preserves
+			// the invariant `charCount === sum(non-empty lengths) + max(0, N-1)`.
+			cur.charCount += line.length + (curNonEmpty > 0 ? 1 : 0);
 			this.scheduleFlush(cur);
 			return { host: cur, lineIndex };
 		}
@@ -414,8 +551,13 @@ export class TelegramStreamer {
 	 * frame (e.g. tool stuck at 📖 after toolEnd).
 	 */
 	private async flushActivityNow(host: ActivityMessage): Promise<void> {
-		const text = host.lines.join("\n");
-		if (text === host.renderedText) return;
+		const text = host.lines.filter(l => l !== "").join("\n");
+		// Telegram rejects empty editMessageText. Unreachable today
+		// (collapse only runs after a parent `task` tool whose own line
+		// survives at index 0), but a future caller that tombstones every
+		// row would otherwise loop in autoRetry forever. Treat empty as
+		// "already in sync" so the chat keeps its last rendered frame.
+		if (text === host.renderedText || text === "") return;
 		try {
 			await this.bot.api.editMessageText(this.chatId, host.messageId, text, {
 				// URL-containing lines (bash: curl …, read https://…) would
@@ -464,6 +606,7 @@ export class TelegramStreamer {
 		// the tool messages already show what happened, and a bare
 		// "(no response)" line was just noise.
 		this.toolMsgs.clear();
+		this.subagentSlots.clear();
 		this.activity = null;
 	}
 
@@ -479,6 +622,7 @@ export class TelegramStreamer {
 			await Promise.allSettled([...this.inflightFlushes]);
 		}
 		this.toolMsgs.clear();
+		this.subagentSlots.clear();
 		this.activity = null;
 		await this.send(text);
 	}

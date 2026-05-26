@@ -140,3 +140,48 @@ export function renderToolEnd(
 	const head = detail ? `: ${truncate(detail, 100)}` : "";
 	return `❌ ${toolName} failed${head}`;
 }
+
+/** Trimmed description label shown in the subagent block. */
+const SUBAGENT_LABEL_MAX = 28;
+
+/**
+ * Render one row in the parent `task`'s subagent block. Format:
+ *
+ *   `  └ [i] <agent> "<label>"  <currentTool render>  · N tools`
+ *
+ * Designed to be replace-in-place by `TelegramStreamer.subagentLine`:
+ * subagent progress events fire ~10Hz per child, so every visible field
+ * must come from the latest snapshot (no monotonic counters that would
+ * disagree across edits) and the line shape stays stable so the eye
+ * tracks the same row across replacements.
+ *
+ * `currentTool` may be undefined between tool boundaries — we fall back
+ * to a `⏳ <lastIntent or "idle">` heartbeat so a slot is never blank.
+ */
+export function renderSubagentProgress(
+	index: number,
+	agent: string,
+	description: string | undefined,
+	currentTool: string | undefined,
+	/** AgentProgress.currentToolArgs is a pre-flattened *string* preview
+	 *  produced by `extractToolArgsPreview` in the harness — NOT a
+	 *  structured args object. Passing it through `renderToolStart`
+	 *  would lose the preview entirely (the renderers read `a.path` /
+	 *  `a.command` on an empty object cast). Render it directly. */
+	currentToolArgs: string | undefined,
+	lastIntent: string | undefined,
+	toolCount: number,
+): string {
+	const label = description
+		? ` "${truncate(description, SUBAGENT_LABEL_MAX)}"`
+		: "";
+	let action: string;
+	if (currentTool) {
+		const preview = currentToolArgs ? ` ${truncate(currentToolArgs, 40)}` : "";
+		action = `🔧 ${currentTool}${preview}`;
+	} else {
+		action = `⏳ ${truncate(lastIntent ?? "idle", 40)}`;
+	}
+	const counter = toolCount > 0 ? `  · ${toolCount} tool${toolCount === 1 ? "" : "s"}` : "";
+	return `  └ [${index}] ${agent}${label}  ${action}${counter}`;
+}
