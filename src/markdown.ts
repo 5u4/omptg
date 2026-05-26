@@ -78,10 +78,25 @@ function fenceTables(src: string): string {
  * output), so neutralize at the source.
  */
 function neutralizeHorizontalRules(src: string): string {
-	return src
-		.split("\n")
-		.map(line => /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line) ? "———" : line)
-		.join("\n");
+	// Skip inside triple-backtick fenced blocks: telegram accepts `---`
+	// literal inside a fence (the chars are code content, not parsed as
+	// reserved), so rewriting would silently mangle legitimate code
+	// snippets that happen to contain HR-shaped lines. Matches the
+	// fence-aware pattern used by normalizeHeadings and
+	// neutralizeDoubleBackticks.
+	const lines = src.split("\n");
+	let inFence = false;
+	const HR = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (FENCE_RE.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) continue;
+		if (HR.test(line)) lines[i] = "———";
+	}
+	return lines.join("\n");
 }
 
 
@@ -124,7 +139,19 @@ function neutralizeDoubleBackticks(src: string): string {
 			// `` ` x ` `` doesn't render as `[space]x[space]`, but stay
 			// out of the way for anything richer.
 			let flat = inner.replace(/`/g, "");
-			if (flat.length >= 2 && flat.startsWith(" ") && flat.endsWith(" ")) {
+			// CommonMark edge-space rule: strip one leading + one trailing
+			// space when both edges have one, ONLY if at least one
+			// non-space char remains in between. Without the non-space
+			// guard, `` `` `` (two spaces) collapses to "" → ` ` (empty
+			// code), which telegram parses as another adjacent-backtick
+			// hazard — the exact failure mode this neutralizer exists to
+			// prevent.
+			if (
+				flat.length >= 2
+				&& flat.startsWith(" ")
+				&& flat.endsWith(" ")
+				&& /\S/.test(flat)
+			) {
 				flat = flat.slice(1, -1);
 			}
 			return "`" + flat + "`";

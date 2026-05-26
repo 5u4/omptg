@@ -90,7 +90,11 @@ describe("splitMarkdownForTelegram", () => {
 		// alignment the author intended survives. The original source has
 		// no leading/trailing space inside the `` `` `` span, so the
 		// rewrite keeps the dash adjacent to the open delimiter.
-		expect(md).toContain("priority: 0-3");
+		// Must be inside a single-backtick inline-code span. Without the
+		// backtick anchors a future regression where the neutralizer
+		// loses its wrapping (and telegramify escapes the `-` outside
+		// code) would still pass `toContain("priority: 0-3")`.
+		expect(md).toMatch(/`[^`]*priority: 0-3[^`]*`/);
 	});
 
 	test("flattens minimal `` x `` spans (telegramify already handles these but check pipeline)", () => {
@@ -138,6 +142,29 @@ describe("splitMarkdownForTelegram", () => {
 		// At least 3 spaces survive between `foo` and `bar` (telegramify
 		// may not add escapes inside code, so the literal is verbatim).
 		expect(md).toMatch(/foo {3,}bar/);
+	});
+
+	test("neutralizeDoubleBackticks does NOT collapse an all-space span to empty code", () => {
+		// Regression: edge-space rule used to fire unconditionally. A
+		// `` `` `` (two literal spaces) would become "" → output `` ``
+		// (two adjacent backticks = empty code entity) — the exact
+		// failure mode the neutralizer exists to prevent.
+		const src = "blank ``  `` here";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		// At minimum: no two-in-a-row backticks in the output.
+		expect(md).not.toMatch(/``/);
+	});
+
+	test("neutralizeHorizontalRules skips `---` inside fenced code blocks", () => {
+		// Regression: HR neutralizer was line-by-line without fence
+		// tracking, so a fenced snippet showing a literal `---` would
+		// have its content silently rewritten to `———`. Telegram accepts
+		// `---` inside a fence (chars are code content, not parsed as
+		// reserved), so the rewrite was both unnecessary and lossy.
+		const src = "```\n---\n```";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		expect(md).toContain("---");
+		expect(md).not.toContain("———");
 	});
 
 });
