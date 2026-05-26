@@ -86,7 +86,11 @@ describe("splitMarkdownForTelegram", () => {
 		const md = splitMarkdownForTelegram(src)[0]!.md;
 		// Inner-emphasis backticks gone; single inline-code span survives.
 		expect(md).not.toMatch(/``/);
-		expect(md).toContain("`- priority: 0-3`");
+		// We preserve inner whitespace verbatim (no normalize/trim) so any
+		// alignment the author intended survives. The original source has
+		// no leading/trailing space inside the `` `` `` span, so the
+		// rewrite keeps the dash adjacent to the open delimiter.
+		expect(md).toContain("priority: 0-3");
 	});
 
 	test("flattens minimal `` x `` spans (telegramify already handles these but check pipeline)", () => {
@@ -100,6 +104,40 @@ describe("splitMarkdownForTelegram", () => {
 		const md = splitMarkdownForTelegram(src)[0]!.md;
 		// Inside a fence, the double-backticks are literal code content.
 		expect(md).toContain("``");
+	});
+
+	test("does NOT touch double-backticks inside a GFM table cell (fenceTables wraps the table first)", () => {
+		// Regression: original implementation ran neutralizeDoubleBackticks
+		// BEFORE fenceTables, so a `` ``x`` `` inside a table cell would
+		// be flattened to `` `x` `` and then the whole table got fenced
+		// — the in-cell literal was silently rewritten. After reorder
+		// (fenceTables → neutralizeDoubleBackticks), the table content is
+		// already inside a triple-backtick block when the neutralizer
+		// runs, so its fence tracker skips it and the cell stays literal.
+		const src = [
+			"| name | code |",
+			"| --- | --- |",
+			"| foo | ``literal`` |",
+		].join("\n");
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		// Inside the fence telegramify escapes backticks for safety, so
+		// the literal `` `` `` come through as `\`\``. What matters is
+		// the neutralizer did NOT collapse them to a single backtick —
+		// if it had run, we'd see `\`literal\`` (one pair). The double
+		// pair surviving is the proof that fenceTables ran first and
+		// the neutralizer skipped the now-fenced content.
+		expect(md).toMatch(/\\`\\`literal\\`\\`/);
+	});
+
+	test("preserves multi-space alignment inside flattened double-backtick spans", () => {
+		// Regression: original implementation called replace(/  +/g, ' ')
+		// and trimmed, which silently rewrote any code span that relied
+		// on multiple spaces for alignment / fixed-width formatting.
+		const src = "look ``foo   bar`` here";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		// At least 3 spaces survive between `foo` and `bar` (telegramify
+		// may not add escapes inside code, so the literal is verbatim).
+		expect(md).toMatch(/foo {3,}bar/);
 	});
 
 });
