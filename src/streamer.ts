@@ -94,6 +94,16 @@ interface ActivityMessage {
 	 * when an earlier edit is stuck in autoRetry backoff.
 	 */
 	lastFlush: Promise<void> | null;
+	/**
+	 * Keyed line registry: maps subagent slot key → lineIndex in `lines`.
+	 * Used by `subagentLine` to replace-in-place instead of appending a
+	 * new line on every progress event, and by `subagentCollapse` to
+	 * tombstone the whole block when its parent `task` ends.
+	 *
+	 * A tombstoned slot stays in `lines` as `""` so existing `toolMsgs`
+	 * lineIndex references remain valid; renderer filters empty lines.
+	 */
+	keys: Map<string, number>;
 }
 
 export class TelegramStreamer {
@@ -261,6 +271,74 @@ export class TelegramStreamer {
 	}
 
 	/**
+	 * Render or replace a keyed "subagent status" line inside the current
+	 * activity message. The key identifies a stable slot — first call for
+	 * a given key appends a line and registers it; subsequent calls for
+	 * the same key rewrite that line in place (no new append, no cap
+	 * pressure beyond the initial slot).
+	 *
+	 * Used by the `task:subagent:progress` bridge: 3 parallel subagents
+	 * emitting ~10Hz progress each collapse into 3 stable lines that
+	 * tick in place rather than 30+ append events that would seal the
+	 * activity message in seconds.
+	 *
+	 * If the key was tombstoned by `subagentCollapse` (terminal state),
+	 * the call is dropped — late progress events can't resurrect a slot.
+	 * If the active host has been sealed and a fresh one opened since
+	 * the slot was registered, the key is treated as new on the new host.
+	 */
+	async subagentLine(key: string, line: string): Promise<void> {
+		if (this.finalized || !line) return;
+		const cur = this.activity;
+		if (cur) {
+			const existing = cur.keys.get(key);
+			if (existing !== undefined) {
+				// Tombstone marker: collapse already ran for this slot.
+				if (cur.lines[existing] === "") return;
+				if (cur.lines[existing] === line) return;
+				const prev = cur.lines[existing]!.length;
+				cur.lines[existing] = line;
+				cur.charCount += line.length - prev;
+				this.scheduleFlush(cur);
+				return;
+			}
+		}
+		const placement = await this.appendActivityLine(line);
+		if (placement) placement.host.keys.set(key, placement.lineIndex);
+	}
+
+	/**
+	 * Collapse a group of keyed slots: tombstone every line and free its
+	 * char/line budget, optionally append a one-line summary in place of
+	 * the block. Called from the parent `task` tool_execution_end so the
+	 * activity message reverts to a single `✅ task → 3 × explore (…)`
+	 * row and gives the cap budget back for subsequent main-agent events.
+	 *
+	 * Tombstoned slots stay in `host.lines` as `""` (filtered at render)
+	 * to preserve every `toolMsgs` lineIndex that points at a later row.
+	 */
+	subagentCollapse(keys: readonly string[]): void {
+		if (this.finalized || keys.length === 0) return;
+		const cur = this.activity;
+		if (!cur) return;
+		let mutated = false;
+		for (const key of keys) {
+			const idx = cur.keys.get(key);
+			if (idx === undefined) continue;
+			const text = cur.lines[idx];
+			if (text === undefined || text === "") continue;
+			// `+1` mirrors the newline join cost we added at append time.
+			cur.charCount -= text.length + 1;
+			cur.lines[idx] = "";
+			// Intentionally NOT deleting `cur.keys.get(key)`: keeping the
+			// entry lets `subagentLine` detect a tombstoned slot (line ===
+			// "") and drop late progress instead of re-appending a new row.
+			mutated = true;
+		}
+		if (mutated) this.scheduleFlush(cur);
+	}
+
+	/**
 	 * Append `line` to the current rolling activity message, sealing and
 	 * opening a fresh one if the addition would breach either cap. Returns
 	 * the host + line index so callers (toolStart) can edit the line later.
@@ -300,6 +378,7 @@ export class TelegramStreamer {
 				pendingFlush: null,
 				pendingFlushRun: null,
 				lastFlush: null,
+				keys: new Map(),
 			};
 			this.activity = host;
 			return { host, lineIndex: 0 };
@@ -414,7 +493,7 @@ export class TelegramStreamer {
 	 * frame (e.g. tool stuck at 📖 after toolEnd).
 	 */
 	private async flushActivityNow(host: ActivityMessage): Promise<void> {
-		const text = host.lines.join("\n");
+		const text = host.lines.filter(l => l !== "").join("\n");
 		if (text === host.renderedText) return;
 		try {
 			await this.bot.api.editMessageText(this.chatId, host.messageId, text, {

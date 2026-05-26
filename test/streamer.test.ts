@@ -306,3 +306,83 @@ describe("TelegramStreamer activity coalescing", () => {
 		expect(stub.edits[1]!.text).toBe("📖 read a.ts\n💻 bash: ls\nlate line");
 	});
 });
+
+describe("TelegramStreamer subagent slots", () => {
+	test("subagentLine appends first time, replaces in place on subsequent calls", async () => {
+		const { bot, sends, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t-task", "🤖 task → 2 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts  · 1 tools");
+		await s.subagentLine("k1", "  └ [1] explore  🔍 search /foo/  · 2 tools");
+		await s.subagentLine("k0", "  └ [0] explore  💻 bash: ls  · 3 tools"); // replace
+		await s.flushPending();
+		expect(sends.length).toBe(1);
+		expect(edits.length).toBeGreaterThanOrEqual(1);
+		const finalText = edits[edits.length - 1]!.text;
+		const lines = finalText.split("\n");
+		expect(lines.length).toBe(3); // task + 2 subagent rows; row 0 replaced not appended
+		expect(lines[1]).toContain("💻 bash: ls");
+		expect(lines[2]).toContain("search /foo/");
+	});
+
+	test("subagentLine no-op when called with identical text (no extra edit)", async () => {
+		const { bot, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t", "🤖 task → 1 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		await s.flushPending();
+		const editsBefore = edits.length;
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts"); // same
+		await s.flushPending();
+		expect(edits.length).toBe(editsBefore);
+	});
+
+	test("subagentCollapse tombstones registered slots and frees their cap budget", async () => {
+		const { bot, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t-task", "🤖 task → 2 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		await s.subagentLine("k1", "  └ [1] explore  🔍 search /x/");
+		await s.flushPending();
+		s.subagentCollapse(["k0", "k1"]);
+		await s.flushPending();
+		const finalText = edits[edits.length - 1]!.text;
+		// Subagent rows gone; only the parent task line remains.
+		expect(finalText).toBe("🤖 task → 2 × explore");
+	});
+
+	test("subagentCollapse preserves toolEnd line-index references for later tools", async () => {
+		// Regression: collapse must not delete array slots or it shifts the
+		// lineIndex of any later tool start line, sending toolEnd to the
+		// wrong row.
+		const { bot, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t-task", "🤖 task → 1 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		await s.toolEnd("t-task", false, undefined); // task tool finished
+		s.subagentCollapse(["k0"]);
+		await s.toolStart("t-next", "📖 read b.ts");
+		await s.toolEnd("t-next", false, undefined);
+		await s.flushPending();
+		const finalText = edits[edits.length - 1]!.text;
+		const lines = finalText.split("\n");
+		expect(lines).toEqual([
+			"✅ task → 1 × explore",
+			"✅ read b.ts",
+		]);
+	});
+
+	test("subagentLine after collapse does not resurrect a tombstoned slot", async () => {
+		const { bot, edits } = stubBot();
+		const s = new TelegramStreamer(bot, 42);
+		await s.toolStart("t", "🤖 task → 1 × explore");
+		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
+		await s.flushPending();
+		s.subagentCollapse(["k0"]);
+		await s.flushPending();
+		await s.subagentLine("k0", "  └ [0] explore  💻 LATE");
+		await s.flushPending();
+		const finalText = edits[edits.length - 1]!.text;
+		expect(finalText).toBe("🤖 task → 1 × explore");
+	});
+});
