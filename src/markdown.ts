@@ -78,10 +78,25 @@ function fenceTables(src: string): string {
  * output), so neutralize at the source.
  */
 function neutralizeHorizontalRules(src: string): string {
-	return src
-		.split("\n")
-		.map(line => /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line) ? "———" : line)
-		.join("\n");
+	// Skip inside triple-backtick fenced blocks: telegram accepts `---`
+	// literal inside a fence (the chars are code content, not parsed as
+	// reserved), so rewriting would silently mangle legitimate code
+	// snippets that happen to contain HR-shaped lines. Matches the
+	// fence-aware pattern used by normalizeHeadings and
+	// neutralizeDoubleBackticks.
+	const lines = src.split("\n");
+	let inFence = false;
+	const HR = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (FENCE_RE.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) continue;
+		if (HR.test(line)) lines[i] = "———";
+	}
+	return lines.join("\n");
 }
 
 
@@ -116,10 +131,29 @@ function neutralizeDoubleBackticks(src: string): string {
 		// MAY contain single backticks. Non-greedy so we don't swallow
 		// across multiple spans on the same line.
 		lines[i] = line.replace(/``([\s\S]+?)``/g, (_, inner: string) => {
-			// Drop any inner backticks; collapse double spaces that the
-			// GFM convention often inserts as visual padding around the
-			// embedded backtick.
-			const flat = inner.replace(/`/g, "").replace(/  +/g, " ").trim();
+			// Drop only inner backticks. Preserve whitespace as-is so
+			// alignment/indentation inside the code span is not silently
+			// rewritten. The CommonMark code-span edge-space rule says a
+			// single padding space adjacent to a delimiter is consumed
+			// when both edges have one — handle that minimal case here so
+			// `` ` x ` `` doesn't render as `[space]x[space]`, but stay
+			// out of the way for anything richer.
+			let flat = inner.replace(/`/g, "");
+			// CommonMark edge-space rule: strip one leading + one trailing
+			// space when both edges have one, ONLY if at least one
+			// non-space char remains in between. Without the non-space
+			// guard, `` `` `` (two spaces) collapses to "" → ` ` (empty
+			// code), which telegram parses as another adjacent-backtick
+			// hazard — the exact failure mode this neutralizer exists to
+			// prevent.
+			if (
+				flat.length >= 2
+				&& flat.startsWith(" ")
+				&& flat.endsWith(" ")
+				&& /\S/.test(flat)
+			) {
+				flat = flat.slice(1, -1);
+			}
 			return "`" + flat + "`";
 		});
 	}
@@ -191,10 +225,24 @@ export function splitMarkdownForTelegram(
 	text: string,
 	budget = MAX_MESSAGE_LEN,
 ): MarkdownChunk[] {
-	// Wrap GFM tables in code fences BEFORE line-walking so the fence-balance
-	// logic below treats them as ordinary fenced blocks. Strip markdown HR
-	// lines first so telegramify can't emit a raw `---` that Telegram rejects.
-	const lines = fenceTables(neutralizeHorizontalRules(neutralizeDoubleBackticks(normalizeHeadings(text)))).split("\n");
+	// Pre-telegramify pipeline. ORDER MATTERS, document why each pass runs
+	// where it does:
+	//   1. normalizeHeadings: rewrite ATX `#`/`##`/`###` to bold/italic
+	//      visuals before anything else inspects line shape.
+	//   2. fenceTables: wrap GFM tables in triple-backtick fences so any
+	//      pass after this one treats their cells as code and leaves them
+	//      alone. MUST run before passes that mutate line text inside
+	//      what would otherwise be table cells.
+	//   3. neutralizeDoubleBackticks: flatten GFM `` ``…`` `` spans that
+	//      Telegram MarkdownV2 can't parse. Runs after fenceTables so
+	//      double-backticks inside a now-fenced table cell stay literal.
+	//   4. neutralizeHorizontalRules: kill bare `---`/`***`/`___` HR
+	//      lines that Telegram rejects as unescaped reserved chars.
+	const normalized = normalizeHeadings(text);
+	const fenced = fenceTables(normalized);
+	const flattened = neutralizeDoubleBackticks(fenced);
+	const noHr = neutralizeHorizontalRules(flattened);
+	const lines = noHr.split("\n");
 	const out: MarkdownChunk[] = [];
 	let buf: string[] = [];
 	let openInfo: string | null = null;
