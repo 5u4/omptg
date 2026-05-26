@@ -163,16 +163,25 @@ export function renderSubagentProgress(
 	agent: string,
 	description: string | undefined,
 	currentTool: string | undefined,
-	currentToolArgs: unknown,
+	/** AgentProgress.currentToolArgs is a pre-flattened *string* preview
+	 *  produced by `extractToolArgsPreview` in the harness — NOT a
+	 *  structured args object. Passing it through `renderToolStart`
+	 *  would lose the preview entirely (the renderers read `a.path` /
+	 *  `a.command` on an empty object cast). Render it directly. */
+	currentToolArgs: string | undefined,
 	lastIntent: string | undefined,
 	toolCount: number,
 ): string {
 	const label = description
 		? ` "${truncate(description, SUBAGENT_LABEL_MAX)}"`
 		: "";
-	const action = currentTool
-		? renderToolStart(currentTool, currentToolArgs)
-		: `⏳ ${truncate(lastIntent ?? "idle", 40)}`;
+	let action: string;
+	if (currentTool) {
+		const preview = currentToolArgs ? ` ${truncate(currentToolArgs, 40)}` : "";
+		action = `🔧 ${currentTool}${preview}`;
+	} else {
+		action = `⏳ ${truncate(lastIntent ?? "idle", 40)}`;
+	}
 	const counter = toolCount > 0 ? `  · ${toolCount} tool${toolCount === 1 ? "" : "s"}` : "";
 	return `  └ [${index}] ${agent}${label}  ${action}${counter}`;
 }
