@@ -75,4 +75,31 @@ describe("splitMarkdownForTelegram", () => {
 		expect(md).toContain("#42");
 		expect(md).not.toContain("━━━");
 	});
+
+	test("flattens GFM double-backtick spans that telegram can't parse", () => {
+		// Regression: my own message dogfooded a `` ``- `priority`: 0-3 `` `` —
+		// GFM double-backtick form for embedding a literal `. telegramify-markdown
+		// preserves it verbatim, but telegram treats each ` independently,
+		// turning the outer `` `` into empty code entities and exposing the
+		// bare `-` to MarkdownV2's reserved-char rule. Output: HTTP 400.
+		const src = "the snippet ``- `priority`: 0-3 `` lives there";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		// Inner-emphasis backticks gone; single inline-code span survives.
+		expect(md).not.toMatch(/``/);
+		expect(md).toContain("`- priority: 0-3`");
+	});
+
+	test("flattens minimal `` x `` spans (telegramify already handles these but check pipeline)", () => {
+		const md = splitMarkdownForTelegram("call ``foo`` here")[0]!.md;
+		expect(md).not.toMatch(/``/);
+		expect(md).toContain("`foo`");
+	});
+
+	test("leaves triple-backtick fenced blocks untouched (only inline `` `` neutralized)", () => {
+		const src = "```ts\nconst x = `` ``;\n```";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		// Inside a fence, the double-backticks are literal code content.
+		expect(md).toContain("``");
+	});
+
 });

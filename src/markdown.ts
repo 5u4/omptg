@@ -84,6 +84,48 @@ function neutralizeHorizontalRules(src: string): string {
 		.join("\n");
 }
 
+
+/**
+ * GFM uses `` ``…`` `` (double-backtick spans) when the inline content
+ * contains a literal backtick that single-backtick code can't hold.
+ * `telegramify-markdown` preserves them verbatim under `keep` mode, but
+ * Telegram MarkdownV2 has no double-backtick token — its parser reads
+ * each `` ` `` independently, treating adjacent `` `` `` as two empty
+ * code entities. Any reserved char (`-`, `.`, `(`, `!`, …) caught
+ * between two such empty entities is then "outside code" and trips
+ * `Bad Request: can't parse entities: Character '…' is reserved`.
+ *
+ * Fix: flatten every `` `` x `y` z `` `` to a single inline-code span
+ * by stripping inner backticks (`` `x y z` ``). The inner emphasis is
+ * lost but the message renders instead of fallback-to-plain.
+ *
+ * Skipped inside triple-backtick fenced blocks so legitimate code stays
+ * untouched. The fence tracker matches `splitMarkdownForTelegram`'s.
+ */
+function neutralizeDoubleBackticks(src: string): string {
+	const lines = src.split("\n");
+	let inFence = false;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (FENCE_RE.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) continue;
+		// Match a double-backtick span: `` <content> `` with content that
+		// MAY contain single backticks. Non-greedy so we don't swallow
+		// across multiple spans on the same line.
+		lines[i] = line.replace(/``([\s\S]+?)``/g, (_, inner: string) => {
+			// Drop any inner backticks; collapse double spaces that the
+			// GFM convention often inserts as visual padding around the
+			// embedded backtick.
+			const flat = inner.replace(/`/g, "").replace(/  +/g, " ").trim();
+			return "`" + flat + "`";
+		});
+	}
+	return lines.join("\n");
+}
+
 /**
  * Rewrite ATX headings (`#`, `##`, `###`, …) to plain bold/italic lines
  * with visual prefixes, because Telegram MarkdownV2 has no heading syntax
@@ -152,7 +194,7 @@ export function splitMarkdownForTelegram(
 	// Wrap GFM tables in code fences BEFORE line-walking so the fence-balance
 	// logic below treats them as ordinary fenced blocks. Strip markdown HR
 	// lines first so telegramify can't emit a raw `---` that Telegram rejects.
-	const lines = fenceTables(neutralizeHorizontalRules(normalizeHeadings(text))).split("\n");
+	const lines = fenceTables(neutralizeHorizontalRules(neutralizeDoubleBackticks(normalizeHeadings(text)))).split("\n");
 	const out: MarkdownChunk[] = [];
 	let buf: string[] = [];
 	let openInfo: string | null = null;
