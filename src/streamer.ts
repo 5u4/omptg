@@ -9,7 +9,7 @@
  *   notices) is coalesced into a single rolling **activity message**:
  *   the first event sends one telegram message, subsequent events append
  *   a line and `editMessageText` the same message id. On error,
- *   `tool_execution_end` rewrites the original `📖 …` line in place to
+ *   `tool_execution_end` rewrites the original tool-start line in
  *   `❌ … : <detail>` via a saved `{host, lineIndex}` reference.
  *   Successful tools leave the start line untouched so the per-tool
  *   emoji stays visible. Concurrent tools are matched by `toolCallId`.
@@ -260,8 +260,8 @@ export class TelegramStreamer {
 	}
 
 	/**
-	 * Tool finished: on error, rewrite the original `📖 …` line in
-	 * place to `❌ <detail>`. On success, leave the start line as-is so
+	 * Tool finished: on error, rewrite the original tool-start line
+	 * in place to `❌ <detail>`. On success, leave the start line as-is so
 	 * the per-tool emoji stays visible (the rolling cap eventually
 	 * scrolls it off). The host activity message may already be sealed
 	 * (a later tool tipped it over the cap); editing old lines is still

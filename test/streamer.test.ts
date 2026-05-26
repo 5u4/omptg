@@ -97,7 +97,7 @@ describe("TelegramStreamer activity coalescing", () => {
 		expect(edits[0]!.opts?.link_preview_options).toEqual({ is_disabled: true });
 	});
 
-	test("toolEnd rewrites the original line in place", async () => {
+	test("toolEnd on success leaves the original tool-start line unchanged", async () => {
 		const { bot, sends, edits } = stubBot();
 		const s = new TelegramStreamer(bot, 42);
 		await s.toolStart("t1", "📖 read a.ts");
