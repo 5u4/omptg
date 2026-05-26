@@ -401,7 +401,7 @@ export class TelegramStreamer {
 		const curNonEmpty = cur ? countNonEmptyLines(cur.lines) : 0;
 		const wouldOverflow = cur !== null && (
 			curNonEmpty + 1 > ACTIVITY_LINE_CAP ||
-			cur.charCount + 1 + line.length > ACTIVITY_CHAR_CAP
+			cur.charCount + line.length + (curNonEmpty > 0 ? 1 : 0) > ACTIVITY_CHAR_CAP
 		);
 		if (cur && !wouldOverflow) {
 			const lineIndex = cur.lines.length;

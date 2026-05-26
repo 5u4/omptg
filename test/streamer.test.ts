@@ -439,29 +439,37 @@ describe("TelegramStreamer subagent cross-host regressions", () => {
 		expect(finalB).not.toContain("[0] explore");
 	});
 
-	test("subagentCollapse keeps charCount non-negative when the subagent row was the host's first line", async () => {
+	test("post-collapse cap math still admits a near-cap append into the now-empty host", async () => {
 		// Activity message starts fresh with a subagent row at index 0
 		// (e.g. main agent had no recent activity when progress arrived).
 		// Arithmetic decrement of `text.length + 1` would dip charCount
-		// negative; recomputeCharCount must clamp at 0.
-		const { bot } = stubBot();
+		// negative; recomputeCharCount must clamp at 0. Symmetrically,
+		// the cap check has to use the conditional newline-join cost so
+		// a near-cap append after collapse doesn't falsely overflow.
+		const { bot, sends, edits } = stubBot();
 		const s = new TelegramStreamer(bot, 42);
 		await s.subagentLine("k0", "  └ [0] explore  📖 read a.ts");
 		await s.flushPending();
+		const hostAId = sends[0]!.messageId;
 		s.subagentCollapse(["k0"]);
 		await s.flushPending();
-		// No assertions on edit content here (it just goes empty); the
-		// invariant is that subsequent appends still respect the cap math.
-		// Probe by appending a 3000-char line — should fit cleanly into the
-		// (now empty) host without falsely sealing.
+		// 3000 chars < ACTIVITY_CHAR_CAP (3500), well within budget for an
+		// empty host. With correct cap math this edits the existing host;
+		// a regression that mis-counts a phantom newline would seal A and
+		// open B with the big line as a fresh send.
 		const big = "x".repeat(3000);
 		await s.notice(big);
 		await s.flushPending();
-		// We expect the big line to land — either edited into the existing
-		// host or as a fresh send if the empty host was sealed. Either way,
-		// at least one message must carry it.
-		// (We don't assert exact sends count: the empty-host edit path is
-		// fine, and a fresh send is also fine; we're testing that the cap
-		// math didn't go pathological.)
+		// Hard invariant: the big line must appear somewhere — either the
+		// last edit on host A, or a fresh send if the host was sealed.
+		const aEdits = edits.filter(e => e.messageId === hostAId);
+		const aLast = aEdits.length > 0 ? aEdits[aEdits.length - 1]!.text : "";
+		const landedOnA = aLast.includes(big);
+		const landedOnNewSend = sends.slice(1).some(s => s.text.includes(big));
+		expect(landedOnA || landedOnNewSend).toBe(true);
+		// Stronger invariant: with correct cap math, A wasn't sealed —
+		// the big line landed on A, not a fresh send.
+		expect(landedOnA).toBe(true);
+		expect(sends.length).toBe(1);
 	});
 });
