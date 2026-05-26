@@ -105,7 +105,7 @@ describe("TelegramStreamer activity coalescing", () => {
 		await s.toolEnd("t1", false, undefined);
 		await s.flushPending();
 		expect(sends.length).toBe(1);
-		expect(edits[edits.length - 1]!.text).toBe("✅ read a.ts\n💻 bash: ls");
+		expect(edits[edits.length - 1]!.text).toBe("📖 read a.ts\n💻 bash: ls");
 	});
 
 	test("toolEnd with error uses errorLine in place", async () => {
@@ -129,11 +129,12 @@ describe("TelegramStreamer activity coalescing", () => {
 		// Editing an old tool's line should still target the FIRST message.
 		await s.toolEnd("t0", false, undefined);
 		await s.flushPending();
-		// At least one edit lands on the first (sealed) message with ✅ on f0.
+		// On success the start line stays as-is; the only edits to the
+		// first (sealed) message are the appends that filled it.
 		const firstMsgEdits = edits.filter(e => e.messageId === sends[0]!.messageId);
 		expect(firstMsgEdits.length).toBeGreaterThan(0);
 		const last = firstMsgEdits[firstMsgEdits.length - 1]!;
-		expect(last.text.startsWith("✅ read f0.ts\n")).toBe(true);
+		expect(last.text.startsWith("📖 read f0.ts\n")).toBe(true);
 	});
 
 	test("seals when char cap would overflow, fresh message starts with the overflowing line", async () => {
@@ -367,8 +368,8 @@ describe("TelegramStreamer subagent slots", () => {
 		const finalText = edits[edits.length - 1]!.text;
 		const lines = finalText.split("\n");
 		expect(lines).toEqual([
-			"✅ task → 1 × explore",
-			"✅ read b.ts",
+			"🤖 task → 1 × explore",
+			"📖 read b.ts",
 		]);
 	});
 

@@ -8,10 +8,11 @@
  * - All "muted" status (tool start/end, mid-turn preambles, retry
  *   notices) is coalesced into a single rolling **activity message**:
  *   the first event sends one telegram message, subsequent events append
- *   a line and `editMessageText` the same message id. `tool_execution_end`
- *   rewrites the original `📖 …` line in place to `✅ …` / `❌ … : <detail>`
- *   via a saved `{host, lineIndex}` reference. Concurrent tools are
- *   matched by `toolCallId`.
+ *   a line and `editMessageText` the same message id. On error,
+ *   `tool_execution_end` rewrites the original `📖 …` line in place to
+ *   `❌ … : <detail>` via a saved `{host, lineIndex}` reference.
+ *   Successful tools leave the start line untouched so the per-tool
+ *   emoji stays visible. Concurrent tools are matched by `toolCallId`.
  * - When an activity message hits either cap (ACTIVITY_CHAR_CAP /
  *   ACTIVITY_LINE_CAP), it is sealed (we drop our `this.activity`
  *   reference) and the next event opens a fresh send. Already-recorded
@@ -55,12 +56,14 @@ const ACTIVITY_LINE_CAP = 25;
  */
 const FLUSH_DEBOUNCE_MS = 250;
 
-/** Replace the leading status emoji (start-of-tool icon) with a result one. */
-function withResultIcon(startLine: string, icon: "✅" | "❌"): string {
+/** Replace the leading status emoji with the error icon. Success keeps
+ *  the original tool emoji unchanged (users preferred the per-tool icon
+ *  over a uniform ✅ tick). */
+function withErrorIcon(startLine: string): string {
 	// renderToolStart always emits "<emoji> <rest>". Swap the first cluster.
 	const sp = startLine.indexOf(" ");
-	if (sp < 0) return `${icon} ${startLine}`;
-	return `${icon}${startLine.slice(sp)}`;
+	if (sp < 0) return `❌ ${startLine}`;
+	return `❌${startLine.slice(sp)}`;
 }
 
 /**
@@ -257,10 +260,12 @@ export class TelegramStreamer {
 	}
 
 	/**
-	 * Tool finished: locate the line we wrote at `toolStart` and rewrite
-	 * it in place to `✅` / `❌ <detail>`. The host activity message may
-	 * already be sealed (a later tool tipped it over the cap); editing
-	 * old lines is still fine since telegram allows edits for ~48h.
+	 * Tool finished: on error, rewrite the original `📖 …` line in
+	 * place to `❌ <detail>`. On success, leave the start line as-is so
+	 * the per-tool emoji stays visible (the rolling cap eventually
+	 * scrolls it off). The host activity message may already be sealed
+	 * (a later tool tipped it over the cap); editing old lines is still
+	 * fine since telegram allows edits for ~48h.
 	 */
 	async toolEnd(
 		toolCallId: string,
@@ -273,15 +278,13 @@ export class TelegramStreamer {
 		this.toolMsgs.delete(toolCallId);
 		const current = entry.host.lines[entry.lineIndex];
 		if (current === undefined) return;
-		const next = isError
-			? errorLine || withResultIcon(current, "❌")
-			: withResultIcon(current, "✅");
+		if (!isError) return; // success: keep the original tool-start line
+		const next = errorLine || withErrorIcon(current);
 		if (next === current) return;
 		// Maintain the `charCount === sum(non-empty lengths) + max(0, N-1)`
-		// invariant. The success path's withResultIcon is length-preserving
-		// (or off by 1 byte at most), but `errorLine` can be much longer
-		// than the original tool-start line and unaccounted growth would
-		// under-count the cap on subsequent appends.
+		// invariant. `errorLine` can be much longer than the original
+		// tool-start line and unaccounted growth would under-count the
+		// cap on subsequent appends.
 		entry.host.charCount += next.length - current.length;
 		entry.host.lines[entry.lineIndex] = next;
 		this.scheduleFlush(entry.host);
