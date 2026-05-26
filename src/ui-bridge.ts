@@ -174,7 +174,7 @@ export class TelegramUI implements ExtensionUIContext {
 		// post a numbered preview as a regular message so the user can read
 		// the full option text, and switch buttons to short "1)" / "2)" /…
 		// labels. Short options keep the original verbatim-button UX.
-		const BUTTON_BUDGET = 60;
+		const BUTTON_BUDGET = 20;
 		const longOptions = options.some(o => visualWidth(o) > BUTTON_BUDGET);
 		if (longOptions) {
 			const preview = [

@@ -174,7 +174,7 @@ describe("TelegramUI.select preview", () => {
 	test("CJK options wider than the budget trigger a numbered preview", async () => {
 		const { bot, sent } = stubBot();
 		const ui = new TelegramUI(bot, 1);
-		// ~35 CJK code points → visual width ≈ 70, well over the 60-col budget
+		// ~35 CJK code points → visual width ≈ 70, well over the 20-col budget
 		// even though `.length` is only 35.
 		const longCjk =
 			"字符上限（如三千五百字）：超过则封存当前消息，开新消息继续显示新内容";
