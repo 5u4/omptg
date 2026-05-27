@@ -268,4 +268,34 @@ describe("WebBridge", () => {
 		const b2 = makeBridge();
 		expect(b2.listSessions()[0]?.modelId).toBe("gpt-5");
 	});
+
+	it("backfill is sent for empty sessions so the client gets earliestSeq", () => {
+		// N1: even with no events, a fresh subscriber must receive a
+		// backfill envelope so the gap-detect predicate works on the
+		// very first event the server later assigns.
+		const b = makeBridge();
+		const r = b.mintRoute();
+		b.open(r);
+
+		const sub = makeSub();
+		b.addSubscriber(sub);
+		b.applySubscription(sub, [{ key: r.key }]);
+
+		const bf = sub.received.find(m => m.type === "session.backfill") as
+			| { type: "session.backfill"; earliestSeq: number; events: unknown[] }
+			| undefined;
+		expect(bf).toBeDefined();
+		expect(bf!.events).toEqual([]);
+		// nextSeq is 1 (no events yet); earliestSeq === 1 means no gap.
+		expect(bf!.earliestSeq).toBe(1);
+	});
+
+	it("validateCwd rejects relative paths", () => {
+		// N2: resolvePath would have rebased "../foo" onto process.cwd()
+		// and potentially punched through the allowlist.
+		const b = makeBridge();
+		expect(b.validateCwd("relative/path")).toBeUndefined();
+		expect(b.validateCwd("../escape")).toBeUndefined();
+		expect(b.validateCwd("./dot")).toBeUndefined();
+	});
 });

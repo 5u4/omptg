@@ -18,7 +18,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve as resolvePath, sep } from "node:path";
+import { isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 import type {
 	Bridge,
 	SessionRoute,
@@ -279,22 +279,23 @@ export class WebBridge implements Bridge {
 			const since = s.since ?? 0;
 			nextSubs.set(s.key, since);
 			const ring = this.rings.get(s.key) ?? [];
-			// Always send backfill (even if empty) so the client gets
-			// `earliestSeq` and can detect a ring-overflow gap:
-			// `earliestSeq > since + 1` means events were dropped.
 			const tail = ring.filter(e => e.seq > since);
+			// Always emit a backfill envelope (even with empty events)
+			// so the client receives `earliestSeq` and can compute the
+			// gap predicate `earliestSeq > since + 1`. For an empty
+			// ring `earliestSeq = nextSeq` — i.e. the next event the
+			// server will assign — which the client treats as "no
+			// history, no gap".
 			const earliestSeq = ring.length > 0 ? ring[0]!.seq : (this.seqs.get(s.key) ?? 0) + 1;
-			if (tail.length > 0 || ring.length > 0) {
-				sub.send({
-					type: "session.backfill",
-					key: s.key,
-					from: since,
-					earliestSeq,
-					events: tail,
-				});
-				if (tail.length > 0) {
-					nextSubs.set(s.key, tail[tail.length - 1]!.seq);
-				}
+			sub.send({
+				type: "session.backfill",
+				key: s.key,
+				from: since,
+				earliestSeq,
+				events: tail,
+			});
+			if (tail.length > 0) {
+				nextSubs.set(s.key, tail[tail.length - 1]!.seq);
 			}
 			// Bring late subscribers up to date on turn-active state
 			// — otherwise tab-switch mid-turn shows a stale idle UI.
@@ -395,10 +396,11 @@ export class WebBridge implements Bridge {
 	 *  path on success, undefined on rejection. */
 	validateCwd(cwd: string | undefined): string | undefined {
 		if (!cwd || cwd === this.defaultCwd) return this.defaultCwd;
-		// Reject relative paths outright; we resolve client input only
-		// to canonicalize `..` segments before prefix-matching.
+		// Reject relative paths outright: `resolve(cwd)` would silently
+		// rebase them onto process.cwd(), which is almost never what
+		// the client meant and can punch through the prefix allowlist.
+		if (!isAbsolute(cwd)) return undefined;
 		const resolved = resolvePath(cwd);
-		if (resolved === this.defaultCwd) return resolved;
 		if (isUnderPrefix(resolved, this.defaultCwd)) return resolved;
 		for (const p of this.allowedCwdPrefixes) {
 			if (resolved === p || isUnderPrefix(resolved, p)) return resolved;

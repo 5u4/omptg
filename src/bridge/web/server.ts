@@ -102,6 +102,18 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 		}
 		return chat;
 	}
+
+	/** Tear down a route that failed before we ever broadcast a
+	 *  session.created — without this, a failed open/resume leaves a
+	 *  ghost entry in session.list that the client can't drive. */
+	async function cleanupRoute(routeKey: string): Promise<void> {
+		const chat = chats.get(routeKey);
+		chats.delete(routeKey);
+		if (chat) {
+			try { await chat.dispose(); } catch { /* already failing */ }
+		}
+		bridge.removeSession(routeKey);
+	}
 	function summaryFor(routeKey: string): SessionSummary | undefined {
 		const all = bridge.listSessions();
 		return all.find(s => s.key === routeKey);
@@ -124,6 +136,7 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				const chat = getOrCreateChat(route.key, cwd);
 				try { await chat.ensure(); } catch (err) {
 					state.send({ type: "error", message: "failed to open session", cause: String(err) });
+					await cleanupRoute(route.key);
 					return;
 				}
 				bridge.patchSession(route.key, {
@@ -147,6 +160,7 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				const chat = getOrCreateChat(route.key, cwd);
 				try { await chat.resume(msg.sessionFile); } catch (err) {
 					state.send({ type: "error", message: "resume failed", cause: String(err) });
+					await cleanupRoute(route.key);
 					return;
 				}
 				bridge.patchSession(route.key, {
@@ -284,16 +298,24 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
  */
 async function runOneTurn(chat: ChatSession, key: string, text: string): Promise<void> {
 	try {
-		const streamer = await chat.prompt(text);
+		await chat.prompt(text);
 		const s = await chat.ensure();
-		try {
-			await s.waitForIdle();
-		} catch (err) {
-			await streamer.replaceWith(`❌ turn failed: ${errMsg(err)}`);
-			throw err;
-		}
+		await s.waitForIdle();
 	} catch (err) {
+		// Cover both `chat.prompt()` failing (streamer may or may not
+		// be attached yet) and `waitForIdle()` failing (streamer is
+		// definitely attached). If we got a streamer, publish a
+		// `replace` envelope so subscribers distinguish failure from a
+		// clean finalize; otherwise nothing to publish to — log only.
 		log.error("turn.failed", { key, err: String(err) });
+		const streamer = chat.currentStreamer;
+		if (streamer) {
+			try {
+				await streamer.replaceWith(`❌ turn failed: ${errMsg(err)}`);
+			} catch (replaceErr) {
+				log.warn("turn.replace_failed", { key, err: String(replaceErr) });
+			}
+		}
 	} finally {
 		await chat.endTurn();
 	}
@@ -311,12 +333,16 @@ function errMsg(err: unknown): string {
  * visit could otherwise open ws://127.0.0.1:<port>/ws and drive the
  * coding agent.
  */
-function isOriginAllowed(origin: string | null, host: string, port: number): boolean {
+export function isOriginAllowed(origin: string | null, host: string, port: number): boolean {
 	if (!origin) return true; // non-browser client
-	const allowed = new Set([
-		`http://${host}:${port}`,
-		`http://localhost:${port}`,
-		`http://127.0.0.1:${port}`,
-	]);
-	return allowed.has(origin);
+	let parsed: URL;
+	try { parsed = new URL(origin); } catch { return false; }
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+	if (Number(parsed.port || "80") !== port) return false;
+	// Strip IPv6 brackets if the URL parser left them on `hostname`
+	// (Bun does; Node does not) so we can compare against the canonical
+	// host form regardless of how the browser formatted the Origin.
+	const hostname = parsed.hostname.replace(/^\[(.*)\]$/, "$1");
+	const allowedHosts = new Set([host, "localhost", "127.0.0.1", "::1"]);
+	return allowedHosts.has(hostname);
 }

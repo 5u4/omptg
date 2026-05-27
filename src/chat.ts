@@ -219,6 +219,15 @@ export class ChatSession {
 		return this.session?.isStreaming ?? false;
 	}
 
+	/** Currently-attached streamer for the in-flight turn, or undefined
+	 *  if no turn is active. Used by the web bridge's runOneTurn error
+	 *  path to publish a `replace` envelope when prompt()/steer() itself
+	 *  fails after a streamer has already been attached — without it
+	 *  subscribers see `finalize` indistinguishable from success. */
+	get currentStreamer(): Streamer | undefined {
+		return this.streamer;
+	}
+
 	/** True from the moment we dispatch a user turn until `agent_end`
 	 *  (or abort/endTurn) fires. Reflects "is the user still waiting on
 	 *  the LLM?", not the SDK's `isStreaming` — which stays true through
@@ -465,9 +474,11 @@ export class ChatSession {
 	private handleEvent(event: AgentSessionEvent): void {
 		const s = this.streamer;
 		switch (event.type) {
-			// Text deltas are intentionally ignored. The previous design
-			// streamed every token into a placeholder message, which surfaced
-			// a lot of mid-turn reasoning prose to the chat.
+			// Text deltas are forwarded to the streamer's `textDelta`,
+			// which the telegram adapter no-ops (rolling editMessageText
+			// can't keep up with token streams) and the web streamer
+			// turns into a `text_delta` envelope. Thinking and toolcall
+			// deltas are skipped here — they have dedicated UI elsewhere.
 			//
 			// `message_end` text is BUFFERED (not committed) because OMP fires
 			// one message_end per assistant message, and a turn typically
