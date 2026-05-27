@@ -2,7 +2,13 @@
  * omptg web bridge entrypoint.
  *
  * Run: `bun run start:web`
- * Loads OMP_DEFAULT_CWD / OMPTG_WEB_HOST / OMPTG_WEB_PORT from env.
+ * Env vars consumed:
+ *   OMP_DEFAULT_CWD          default cwd for fresh sessions (~/.omptg if unset)
+ *   OMPTG_WEB_HOST           bind host; non-loopback warns loudly (default 127.0.0.1)
+ *   OMPTG_WEB_PORT           listen port; rejects NaN/out-of-range (default 7878)
+ *   OMPTG_WEB_ALLOWED_CWDS   colon-separated path prefixes clients may use on
+ *                            session.open / session.resume in addition to
+ *                            OMP_DEFAULT_CWD (default: defaultCwd subtree only)
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
