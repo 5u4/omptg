@@ -7,7 +7,10 @@ import { WebBridge } from "../src/bridge/web/index.ts";
 import { startWebServer, type RunningServer } from "../src/bridge/web/server.ts";
 
 const STATIC_DIR = join(import.meta.dir, "..", "src", "bridge", "web", "static");
-const STATIC_APP_JS = join(STATIC_DIR, "app.js");
+/** Every artifact `vite build` emits. A partial bundle (someone
+ *  deleted just app.css, an aborted build, etc.) should still
+ *  re-trigger build:web. */
+const BUILD_OUTPUTS = ["app.js", "app.css", "index.html"].map(f => join(STATIC_DIR, f));
 
 let tempDir: string;
 let stateFile: string;
@@ -18,7 +21,7 @@ beforeAll(() => {
 	// Built bundle is gitignored; build it on demand so the suite stays
 	// green on a fresh clone / CI. `vite build` is the canonical
 	// invocation; same script as `bun run build:web`.
-	if (!existsSync(STATIC_APP_JS)) {
+	if (!BUILD_OUTPUTS.every(p => existsSync(p))) {
 		const r = spawnSync("bun", ["run", "build:web"], {
 			cwd: join(import.meta.dir, ".."),
 			stdio: "inherit",

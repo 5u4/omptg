@@ -30,6 +30,6 @@ const placeholder = $derived(req.kind === "input" ? req.placeholder : undefined)
 	class="min-h-[80px]"
 />
 <div class="mt-2 flex gap-1.5">
-	<Button variant="default" size="sm" onclick={submit}>submit (⌘↵)</Button>
+	<Button variant="default" size="sm" onclick={submit}>submit (⌘/Ctrl + ↵)</Button>
 	<Button variant="ghost" size="sm" onclick={() => respond(null)}>cancel</Button>
 </div>
