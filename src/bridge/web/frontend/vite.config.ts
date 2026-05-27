@@ -12,14 +12,20 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwindcss from "@tailwindcss/vite";
-import path from "node:path";
+import { dirname, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// ESM-safe equivalent of CommonJS __dirname. Vite reads this config as
+// an ESM module; relying on the CJS __dirname global makes the config
+// brittle across runtimes (e.g. plain `tsx vite.config.ts`).
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
 	root: ".",
 	plugins: [tailwindcss(), svelte()],
 	resolve: {
 		alias: {
-			$lib: path.resolve(__dirname, "src/lib"),
+			$lib: resolvePath(__dirname, "src/lib"),
 		},
 	},
 	build: {

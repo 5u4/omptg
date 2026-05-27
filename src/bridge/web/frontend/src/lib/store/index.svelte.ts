@@ -74,6 +74,12 @@ export class Session {
 	lastSeq = 0;
 	earliestSeq = 0;
 	readonly tools = new Map<string, ToolState>();
+	/** toolCallId of the currently-running `task` tool, if any. The
+	 *  main agent serializes tool calls, so at most one `task` is
+	 *  active at a time; subagent_line/_collapse target this one.
+	 *  Without it we used to scan all tools per subagent event,
+	 *  which is O(n) and allocates a copied array each call. */
+	activeTaskCallId: string | undefined = undefined;
 
 	constructor(summary: Partial<SessionSummary> & { key: string }) {
 		this.key = summary.key;
@@ -164,6 +170,7 @@ class Store {
 					done: false,
 					subagents: new Map(),
 				});
+				if (ev.toolName === "task") session.activeTaskCallId = ev.toolCallId;
 				session.rows = [...session.rows, { kind: "tool", toolCallId: ev.toolCallId }];
 				break;
 			case "tool_end": {
@@ -175,20 +182,31 @@ class Store {
 					if (ev.line) t.line = ev.line;
 					session.eventsVersion += 1;
 				}
+				if (session.activeTaskCallId === ev.toolCallId) {
+					session.activeTaskCallId = undefined;
+				}
 				break;
 			}
 			case "subagent_line": {
-				const lastTask = [...session.tools.values()].reverse().find(t => !t.done && t.toolName === "task");
-				if (lastTask) {
-					lastTask.subagents.set(ev.slotKey, ev.line);
+				const id = session.activeTaskCallId;
+				if (!id) break;
+				const task = session.tools.get(id);
+				if (task) {
+					task.subagents.set(ev.slotKey, ev.line);
 					session.eventsVersion += 1;
 				}
 				break;
 			}
 			case "subagent_collapse": {
-				const lastTask = [...session.tools.values()].reverse().find(t => t.toolName === "task");
-				if (lastTask) {
-					for (const k of ev.slotKeys) lastTask.subagents.delete(k);
+				// `subagent_collapse` typically fires alongside the task's
+				// tool_end, so the active id may already be cleared by
+				// then; fall back to scanning by slot ownership in that
+				// case (still O(n) but rare and bounded).
+				const id = session.activeTaskCallId;
+				const task = id ? session.tools.get(id)
+					: [...session.tools.values()].reverse().find(t => t.toolName === "task");
+				if (task) {
+					for (const k of ev.slotKeys) task.subagents.delete(k);
 					session.eventsVersion += 1;
 				}
 				break;

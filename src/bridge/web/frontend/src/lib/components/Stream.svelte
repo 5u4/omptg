@@ -15,16 +15,16 @@ function onScroll(): void {
 	stick = atBottom;
 }
 
-// Auto-scroll on content change while sticky. Subscribe to rows length
-// and liveText so streaming + new rows both trigger a check.
+// Auto-scroll on content change while sticky. Svelte 5 `$effect`
+// runs after Svelte's own DOM updates settle for the tick — no
+// queueMicrotask / rAF needed; one `scrollTop = scrollHeight` per
+// reactive batch is correct AND coalesced.
 $effect(() => {
 	void session.rows.length;
 	void session.liveText;
 	void session.eventsVersion;
 	if (scrollEl && stick) {
-		queueMicrotask(() => {
-			if (scrollEl && stick) scrollEl.scrollTop = scrollEl.scrollHeight;
-		});
+		scrollEl.scrollTop = scrollEl.scrollHeight;
 	}
 });
 </script>
