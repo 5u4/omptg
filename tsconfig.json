@@ -27,5 +27,5 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "exclude": ["src/bridge/web/frontend", "node_modules"]
+  "exclude": ["src/bridge/web/frontend", "src/bridge/web/static", "node_modules"]
 }

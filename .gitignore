@@ -3,6 +3,7 @@ node_modules
 dist
 *.log
 
-# esbuild output (regenerated via `bun run build:web`)
+# Vite build output (regenerated via `bun run build:web`)
 src/bridge/web/static/app.js
-src/bridge/web/static/app.js.map
+src/bridge/web/static/app.css
+src/bridge/web/static/*.map
