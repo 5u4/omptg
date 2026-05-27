@@ -2,7 +2,7 @@
  * Per-chat agent runtime. One ChatSession owns:
  *   - the cwd it's bound to
  *   - the live AgentSession (recreated on /new, /dir, /resume)
- *   - the currently-rendering TelegramStreamer (one per in-flight turn)
+ *   - the currently-rendering Streamer (one per in-flight turn)
  *   - pending UI requests awaiting a button tap or text reply
  *
  * Keyed by chat_id in ChatRegistry. v1 is single-thread; topic support
@@ -15,16 +15,15 @@ import {
 import type {
 	AgentSession,
 	AgentSessionEvent,
+	ExtensionUIContext,
 	SessionInfo,
 } from "@oh-my-pi/pi-coding-agent";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import type { Bot } from "grammy";
-import { TelegramStreamer } from "./streamer.ts";
-import { TypingIndicator } from "./typing.ts";
-import { TelegramUI, type PendingUiRequest } from "./ui-bridge.ts";
+import type { Bridge, InteractiveUI, PendingUiRequest, SessionRoute, SessionTransport, Streamer, Typing } from "./bridge/types.ts";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { scoped } from "./logger.ts";
 import { ChatStore } from "./chat-store.ts";
+import { telegramRoute } from "./bridge/telegram/index.ts";
 import { renderToolStart, renderToolEnd, renderSubagentProgress } from "./tool-render.ts";
 import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -37,12 +36,15 @@ import type { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 export interface ChatSessionOptions {
 	chatId: number;
 	cwd: string;
-	bot: Bot;
+	transport: SessionTransport;
+	/** System-prompt addendum from the bridge (telegram/web rendering rules). */
+	systemPromptAddendum: string;
 	/** Forum topic id this session is scoped to. undefined = DM / non-forum
 	 *  group / forum General topic. Drives both ChatRegistry keying and
 	 *  outbound message routing (sendMessage / sendChatAction). */
 	threadId?: number;
 }
+
 
 /**
  * Pull the visible text out of an assistant message's content array.
@@ -71,35 +73,10 @@ function extractAssistantText(content: unknown): string {
  * so we ask the model to prefer lists / key:value lines / inline prose
  * for small data sets. Appended AFTER the SDK defaults.
  */
-const TELEGRAM_SYSTEM_BLOCK = [
-	"# Telegram output guidance",
-	"",
-	"You are talking to the user through a Telegram bot, not a terminal or IDE.",
-	"Telegram MarkdownV2 supports bold/italic, inline code, fenced code",
-	"blocks, links, and lists — but NOT real headings, NOT tables, and NOT",
-	"wide ASCII diagrams. All of these wrap poorly or render flat on phone",
-	"screens.",
-	"",
-	"For comparisons / option matrices / small data sets, prefer:",
-	"  - a markdown list with a one-line summary per item, OR",
-	"  - `key: value` lines under a short heading, OR",
-	"  - a compact paragraph that names the trade-offs inline.",
-	"",
-	"Only use a GFM table when the data genuinely has 3+ columns AND",
-	"the user explicitly asked for a table. Otherwise the bot wraps the",
-	"table in a code fence as a fallback, which is ugly on mobile.",
-
-	"AVOID markdown headings (`#`, `##`, `###`). Telegram has no heading",
-	"syntax — every level collapses to a single bold line, so a `#` title",
-	"and a `###` subsection look identical and the document hierarchy is",
-	"lost. The bridge rewrites headings to distinct visual markers as a",
-	"fallback, but the result is still less readable than prose. Prefer:",
-	"  - a short bold lead-in line (`**Topic.**`) followed by content, OR",
-	"  - a numbered/bulleted list when you'd reach for `###` per item.",
-].join("\n");
-
-function withTelegramPrompt(defaults: string[]): string[] {
-	return [...defaults, TELEGRAM_SYSTEM_BLOCK];
+/** Compose the agent's system prompt: SDK defaults + the active bridge's
+ *  rendering rules (telegram MarkdownV2 caveats, or web full markdown). */
+function withBridgePrompt(addendum: string): (defaults: string[]) => string[] {
+	return defaults => addendum ? [...defaults, addendum] : [...defaults];
 }
 
 /**
@@ -141,12 +118,13 @@ export class ChatSession {
 	readonly chatId: number;
 	readonly threadId: number | undefined;
 	cwd: string;
-	private readonly bot: Bot;
+	private readonly transport: SessionTransport;
+	private readonly systemPromptAddendum: string;
+	private readonly ui: InteractiveUI;
+	private readonly typing: Typing;
 	private session: AgentSession | undefined;
 	private unsubscribe: (() => void) | undefined;
-	private streamer: TelegramStreamer | undefined;
-	private readonly ui: TelegramUI;
-	private readonly typing: TypingIndicator;
+	private streamer: Streamer | undefined;
 	private readonly log;
 	/** First user message text in the current session, captured for title gen. */
 	private firstUserText: string | undefined;
@@ -211,9 +189,10 @@ export class ChatSession {
 		this.chatId = opts.chatId;
 		this.threadId = opts.threadId;
 		this.cwd = opts.cwd;
-		this.bot = opts.bot;
-		this.ui = new TelegramUI(opts.bot, opts.chatId, opts.threadId);
-		this.typing = new TypingIndicator(opts.bot, opts.chatId, opts.threadId);
+		this.transport = opts.transport;
+		this.systemPromptAddendum = opts.systemPromptAddendum;
+		this.ui = opts.transport.ui;
+		this.typing = opts.transport.typing;
 		const suffix = opts.threadId !== undefined ? `:${opts.threadId}` : "";
 		this.log = scoped(`chat:${opts.chatId}${suffix}`);
 	}
@@ -293,7 +272,7 @@ export class ChatSession {
 				cwd: manager.getCwd(),
 				sessionManager: manager,
 				hasUI: true,
-				systemPrompt: withTelegramPrompt,
+				systemPrompt: withBridgePrompt(this.systemPromptAddendum),
 			});
 			this.cwd = manager.getCwd();
 			this.attach(created.session, created.setToolUIContext, created.eventBus);
@@ -330,7 +309,7 @@ export class ChatSession {
 				cwd: manager.getCwd(),
 				sessionManager: manager,
 				hasUI: true,
-				systemPrompt: withTelegramPrompt,
+				systemPrompt: withBridgePrompt(this.systemPromptAddendum),
 			});
 		this.cwd = manager.getCwd();
 		this.attach(created.session, created.setToolUIContext, created.eventBus);
@@ -385,7 +364,7 @@ export class ChatSession {
 				cwd: this.cwd,
 				sessionManager: manager,
 				hasUI: true,
-				systemPrompt: withTelegramPrompt,
+				systemPrompt: withBridgePrompt(this.systemPromptAddendum),
 			});
 		if (created.modelFallbackMessage) {
 			console.warn(
@@ -398,7 +377,7 @@ export class ChatSession {
 
 	private attach(
 		session: AgentSession,
-		setToolUIContext: (ctx: TelegramUI, hasUI: boolean) => void,
+		setToolUIContext: (ctx: ExtensionUIContext, hasUI: boolean) => void,
 		eventBus: EventBus | undefined,
 	): void {
 		this.session = session;
@@ -441,10 +420,10 @@ export class ChatSession {
 	async prompt(
 		text: string,
 		opts?: { replyTo?: number; images?: ImageContent[] },
-	): Promise<TelegramStreamer> {
+	): Promise<Streamer> {
 		const s = await this.ensure();
 		if (this.firstUserText === undefined) this.firstUserText = text;
-		this.streamer = new TelegramStreamer(this.bot, this.chatId, opts?.replyTo, this.threadId);
+		this.streamer = this.transport.newStreamer({ replyTo: opts?.replyTo });
 		this.typing.start();
 		this.turnActive = true;
 		if (s.isStreaming) {
@@ -828,10 +807,19 @@ export class ChatRegistry {
 	private readonly chats = new Map<string, ChatSession>();
 
 	constructor(
-		private readonly bot: Bot,
+		private readonly bridge: Bridge,
 		private readonly defaultCwd: string,
 		private readonly store: ChatStore,
 	) {}
+
+	/** Build the per-route SessionRoute. Today this is telegram-only;
+	 *  when the web bridge lands, a parallel ChatRegistry will be
+	 *  instantiated with its own route scheme. Keeping the helper here
+	 *  preserves the ChatStore binding key (`${chatId}:${threadId ?? ""}`)
+	 *  so non-bridge state migrates cleanly. */
+	private route(chatId: number, threadId?: number): SessionRoute {
+		return telegramRoute(chatId, threadId);
+	}
 
 	/** Persistent binding store, exposed for command handlers. */
 	get bindings(): ChatStore {
@@ -844,18 +832,20 @@ export class ChatRegistry {
 	}
 
 	private key(chatId: number, threadId?: number): string {
-		return `${chatId}:${threadId ?? ""}`;
+		return this.route(chatId, threadId).key;
 	}
 
 	get(chatId: number, threadId?: number): ChatSession {
 		const k = this.key(chatId, threadId);
 		let chat = this.chats.get(k);
 		if (!chat) {
+			const route = this.route(chatId, threadId);
 			chat = new ChatSession({
 				chatId,
 				threadId,
 				cwd: this.cwdFor(chatId, threadId),
-				bot: this.bot,
+				transport: this.bridge.open(route),
+				systemPromptAddendum: this.bridge.systemPromptAddendum(),
 			});
 			this.chats.set(k, chat);
 		}

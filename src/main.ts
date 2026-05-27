@@ -21,6 +21,7 @@ import { ChatRegistry } from "./chat.ts";
 import { ChatStore } from "./chat-store.ts";
 import { PendingVoiceStore } from "./pending-voice.ts";
 import type { Deps } from "./deps.ts";
+import { TelegramBridge } from "./bridge/telegram/index.ts";
 import { installMiddleware } from "./middleware.ts";
 import { installCommands } from "./commands.ts";
 import { installHandlers } from "./handlers/index.ts";
@@ -94,7 +95,8 @@ bot.api.config.use(autoRetry({
 	rethrowInternalServerErrors: false,
 }));
 const chatStore = new ChatStore();
-const registry = new ChatRegistry(bot, DEFAULT_CWD, chatStore);
+const bridge = new TelegramBridge(bot);
+const registry = new ChatRegistry(bridge, DEFAULT_CWD, chatStore);
 const pendingVoice = new PendingVoiceStore();
 
 const deps: Deps = {
