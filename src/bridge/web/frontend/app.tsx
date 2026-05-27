@@ -150,12 +150,21 @@ function resortSessions(): void {
 
 // --- event → display row reducer -----------------------------------------
 
-/** Apply a SessionEvent to a session. Mutates the session's signals. */
-function applyEvent(session: Session, seq: number, ev: SessionEvent): void {
+/** Apply a SessionEvent to a session. Mutates the session's signals.
+ *
+ *  `isLive` distinguishes a freshly-arrived event from a backfilled
+ *  historical one. Live events bump `lastActivity` (resorts the rail)
+ *  and `unread` (drives the badge); backfill replay must NOT, because
+ *  a tab-switch reconnect would otherwise reorder the list and flood
+ *  every inactive session with a phantom unread count proportional to
+ *  its event history. */
+function applyEvent(session: Session, seq: number, ev: SessionEvent, isLive: boolean): void {
 	session.lastSeq = Math.max(session.lastSeq, seq);
-	session.lastActivity.value = Date.now();
-	if (activeKey.value !== session.key) {
-		session.unread.value = session.unread.value + 1;
+	if (isLive) {
+		session.lastActivity.value = Date.now();
+		if (activeKey.value !== session.key) {
+			session.unread.value = session.unread.value + 1;
+		}
 	}
 
 	switch (ev.kind) {
@@ -317,7 +326,7 @@ function handleServer(msg: ServerMsg): void {
 
 		case "session.event": {
 			const s = findSession(msg.key);
-			if (s) applyEvent(s, msg.seq, msg.event);
+			if (s) applyEvent(s, msg.seq, msg.event, true);
 			break;
 		}
 
@@ -333,7 +342,7 @@ function handleServer(msg: ServerMsg): void {
 					text: `⚠ history gap: ${msg.earliestSeq - msg.from - 1} events dropped`,
 				});
 			}
-			for (const e of msg.events) applyEvent(s, e.seq, e.event);
+			for (const e of msg.events) applyEvent(s, e.seq, e.event, false);
 			break;
 		}
 
@@ -423,7 +432,7 @@ function Rail(): VNode {
 				${sessions.value.length === 0
 					? html`<div class="empty" style="padding: 24px;">no sessions yet</div>`
 					: sessions.value.map(s => html`<${SessionItem} key=${s.key} session=${s} />`)}
-			</div>
+		</div>
 		</div>
 	`;
 }
@@ -433,7 +442,10 @@ function SessionItem({ session }: { session: Session }): VNode {
 	const unread = session.unread.value;
 	const turn = session.turnActive.value;
 	const title = session.title.value || session.key;
-	const cwd = session.cwd.value.split("/").slice(-2).join("/") || session.cwd.value;
+	// Split on both POSIX and Windows separators so the rail label
+	// reads sensibly regardless of which OS the server runs on.
+	const cwdParts = session.cwd.value.split(/[/\\]/).filter(Boolean);
+	const cwd = cwdParts.slice(-2).join("/") || session.cwd.value;
 	return html`
 		<div class="session-item ${active ? "active" : ""}" onClick=${() => selectSession(session.key)}>
 			<div class="meta">
