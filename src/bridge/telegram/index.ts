@@ -84,6 +84,62 @@ export function parseTelegramRoute(key: string): RouteIds | undefined {
 	return { chatId, threadId };
 }
 
+/**
+ * Adapt the existing TelegramStreamer (kept verbatim — no changes to
+ * streamer.ts in phase 1/2) to the widened `Streamer` interface that
+ * phase 2 introduced (textDelta, structured toolName/args on
+ * tool start/end). Telegram drops everything web-only; the extra
+ * args are intentionally ignored.
+ */
+class TelegramStreamerAdapter implements Streamer {
+	constructor(private readonly inner: TelegramStreamer) {}
+
+	enqueue(task: () => Promise<void>): void {
+		this.inner.enqueue(task);
+	}
+
+	textDelta(_text: string): void {
+		// no-op: telegram's rolling editMessageText cannot keep up with
+		// token-by-token output, so deltas are intentionally dropped.
+	}
+
+	commitAssistant(text: string): Promise<void> {
+		return this.inner.commitAssistant(text);
+	}
+
+	commitPreamble(text: string): Promise<void> {
+		return this.inner.commitPreamble(text);
+	}
+
+	toolStart(toolCallId: string, line: string, _toolName: string, _args: unknown): Promise<void> {
+		return this.inner.toolStart(toolCallId, line);
+	}
+
+	toolEnd(toolCallId: string, isError: boolean, errorLine: string | undefined, _toolName: string, _result: unknown): Promise<void> {
+		return this.inner.toolEnd(toolCallId, isError, errorLine);
+	}
+
+	notice(line: string): Promise<void> {
+		return this.inner.notice(line);
+	}
+
+	subagentLine(key: string, line: string): Promise<void> {
+		return this.inner.subagentLine(key, line);
+	}
+
+	subagentCollapse(keys: readonly string[]): void {
+		this.inner.subagentCollapse(keys);
+	}
+
+	finalize(): Promise<void> {
+		return this.inner.finalize();
+	}
+
+	replaceWith(text: string): Promise<void> {
+		return this.inner.replaceWith(text);
+	}
+}
+
 class TelegramTransport implements SessionTransport {
 	readonly ui: TelegramUI;
 	readonly typing: TypingIndicator;
@@ -98,7 +154,8 @@ class TelegramTransport implements SessionTransport {
 	}
 
 	newStreamer(opts: { replyTo?: number }): Streamer {
-		return new TelegramStreamer(this.bot, this.chatId, opts.replyTo, this.threadId);
+		const inner = new TelegramStreamer(this.bot, this.chatId, opts.replyTo, this.threadId);
+		return new TelegramStreamerAdapter(inner);
 	}
 
 	async dispose(): Promise<void> {
