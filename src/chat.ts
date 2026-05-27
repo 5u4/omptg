@@ -23,7 +23,6 @@ import type { Bridge, InteractiveUI, PendingUiRequest, SessionRoute, SessionTran
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { scoped } from "./logger.ts";
 import { ChatStore } from "./chat-store.ts";
-import { telegramRoute } from "./bridge/telegram/index.ts";
 import { renderToolStart, renderToolEnd, renderSubagentProgress } from "./tool-render.ts";
 import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -45,7 +44,6 @@ export interface ChatSessionOptions {
 	threadId?: number;
 }
 
-
 /**
  * Pull the visible text out of an assistant message's content array.
  * Assistant content is `(TextContent | ThinkingContent | RedactedThinking |
@@ -66,13 +64,6 @@ function extractAssistantText(content: unknown): string {
 	return parts.join("").trim();
 }
 
-/**
- * Extra system-prompt block injected on every ChatSession we spawn.
- * Telegram MarkdownV2 has no table syntax; we wrap tables in code
- * fences as a safety net, but mobile-screen wrapping makes that ugly,
- * so we ask the model to prefer lists / key:value lines / inline prose
- * for small data sets. Appended AFTER the SDK defaults.
- */
 /** Compose the agent's system prompt: SDK defaults + the active bridge's
  *  rendering rules (telegram MarkdownV2 caveats, or web full markdown). */
 function withBridgePrompt(addendum: string): (defaults: string[]) => string[] {
@@ -812,13 +803,11 @@ export class ChatRegistry {
 		private readonly store: ChatStore,
 	) {}
 
-	/** Build the per-route SessionRoute. Today this is telegram-only;
-	 *  when the web bridge lands, a parallel ChatRegistry will be
-	 *  instantiated with its own route scheme. Keeping the helper here
-	 *  preserves the ChatStore binding key (`${chatId}:${threadId ?? ""}`)
-	 *  so non-bridge state migrates cleanly. */
+	/** Build the per-route SessionRoute. Delegates to the active bridge
+	 *  so ChatRegistry stays transport-neutral; the bridge picks the
+	 *  scheme (telegram packs chatId:threadId, web mints `web:<n>`). */
 	private route(chatId: number, threadId?: number): SessionRoute {
-		return telegramRoute(chatId, threadId);
+		return this.bridge.route(chatId, threadId);
 	}
 
 	/** Persistent binding store, exposed for command handlers. */

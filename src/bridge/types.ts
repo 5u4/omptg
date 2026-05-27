@@ -45,8 +45,16 @@ export interface Bridge {
 	 *  knows what rendering rules its output will hit (MarkdownV2 for
 	 *  Telegram, full markdown for web). */
 	systemPromptAddendum(): string;
+	/** Build the SessionRoute for a (chatId, threadId) pair. Telegram
+	 *  packs `${chatId}:${threadId ?? ""}` (unchanged from pre-bridge
+	 *  for ChatStore binding compatibility); web bridges synthesize
+	 *  their own scheme. ChatRegistry uses this so it never has to
+	 *  import a concrete bridge module. */
+	route(chatId: number, threadId?: number): SessionRoute;
 	/** Lazily build / fetch the transport for `route`. Same route key
-	 *  MUST return the same transport instance across calls. */
+	 *  MUST return the same transport instance across calls — callbacks
+	 *  / text-reply resolution depend on the per-route `pending()` slot
+	 *  surviving between turns. */
 	open(route: SessionRoute): SessionTransport;
 	dispose(): Promise<void>;
 }

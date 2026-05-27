@@ -6,12 +6,14 @@
  * dependency a one-line change instead of touching every signature.
  */
 import type { Bot } from "grammy";
+import type { Bridge } from "./bridge/types.ts";
 import type { ChatRegistry } from "./chat.ts";
 import type { ChatStore } from "./chat-store.ts";
 import type { PendingVoiceStore } from "./pending-voice.ts";
 
 export interface Deps {
 	bot: Bot;
+	bridge: Bridge;
 	registry: ChatRegistry;
 	chatStore: ChatStore;
 	pendingVoice: PendingVoiceStore;

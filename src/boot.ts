@@ -159,6 +159,11 @@ export function installProcessHooks(deps: Deps): void {
 		} catch (err) {
 			log.warn("disposeAll_failed", { err: String(err) });
 		}
+		try {
+			await deps.bridge.dispose();
+		} catch (err) {
+			log.warn("bridge_dispose_failed", { err: String(err) });
+		}
 		process.exit(0);
 	};
 

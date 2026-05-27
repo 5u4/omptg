@@ -116,6 +116,10 @@ export class TelegramBridge implements Bridge {
 		return TELEGRAM_SYSTEM_BLOCK;
 	}
 
+	route(chatId: number, threadId?: number): SessionRoute {
+		return telegramRoute(chatId, threadId);
+	}
+
 	open(route: SessionRoute): SessionTransport {
 		let t = this.transports.get(route.key);
 		if (!t) {

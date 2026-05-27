@@ -101,6 +101,7 @@ const pendingVoice = new PendingVoiceStore();
 
 const deps: Deps = {
 	bot,
+	bridge,
 	registry,
 	chatStore,
 	pendingVoice,
