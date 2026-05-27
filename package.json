@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "bun run src/main.ts",
+    "start:web": "bun run src/web-main.ts",
     "smoke": "bun run scripts/smoke.ts",
     "typecheck": "tsc --noEmit",
     "pm2:start": "pm2 start ecosystem.config.cjs",

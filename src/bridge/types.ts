@@ -84,10 +84,21 @@ export interface Streamer {
 	 *  Tasks run sequentially in submission order; finalize() awaits
 	 *  the tail before sealing. */
 	enqueue(task: () => Promise<void>): void;
+	/** Streaming token from the in-flight assistant message. Telegram
+	 *  ignores deltas (the rolling editMessageText churn was untenable);
+	 *  web accumulates them into the live bubble. */
+	textDelta(text: string): void;
 	commitAssistant(text: string): Promise<void>;
 	commitPreamble(text: string): Promise<void>;
-	toolStart(toolCallId: string, line: string): Promise<void>;
-	toolEnd(toolCallId: string, isError: boolean, errorLine?: string): Promise<void>;
+	/** Tool started. `line` is the pre-rendered header for
+	 *  text-rendering transports (telegram). `toolName`/`args` give
+	 *  structured transports (web) what they need to render an
+	 *  expandable card. */
+	toolStart(toolCallId: string, line: string, toolName: string, args: unknown): Promise<void>;
+	/** Tool finished. `errorLine` is set only on error (telegram
+	 *  rewrites the start line); `result` is the raw output for
+	 *  structured renderers. */
+	toolEnd(toolCallId: string, isError: boolean, errorLine: string | undefined, toolName: string, result: unknown): Promise<void>;
 	notice(line: string): Promise<void>;
 	subagentLine(key: string, line: string): Promise<void>;
 	subagentCollapse(keys: readonly string[]): void;

@@ -219,6 +219,15 @@ export class ChatSession {
 		return this.session?.isStreaming ?? false;
 	}
 
+	/** Currently-attached streamer for the in-flight turn, or undefined
+	 *  if no turn is active. Used by the web bridge's runOneTurn error
+	 *  path to publish a `replace` envelope when prompt()/steer() itself
+	 *  fails after a streamer has already been attached — without it
+	 *  subscribers see `finalize` indistinguishable from success. */
+	get currentStreamer(): Streamer | undefined {
+		return this.streamer;
+	}
+
 	/** True from the moment we dispatch a user turn until `agent_end`
 	 *  (or abort/endTurn) fires. Reflects "is the user still waiting on
 	 *  the LLM?", not the SDK's `isStreaming` — which stays true through
@@ -449,6 +458,11 @@ export class ChatSession {
 		const s = this.streamer;
 		if (s && final) s.enqueue(() => s.commitAssistant(final));
 		await s?.finalize();
+		// Clear the slot so `currentStreamer` actually means
+		// "in-flight turn" instead of leaving the finalized instance
+		// around for the next observer. dispose() clears it too, but
+		// endTurn is the normal-path exit and runs first.
+		if (this.streamer === s) this.streamer = undefined;
 	}
 
 	/** Forward UI pending-request resolution from callback or text reply. */
@@ -465,9 +479,11 @@ export class ChatSession {
 	private handleEvent(event: AgentSessionEvent): void {
 		const s = this.streamer;
 		switch (event.type) {
-			// Text deltas are intentionally ignored. The previous design
-			// streamed every token into a placeholder message, which surfaced
-			// a lot of mid-turn reasoning prose to the chat.
+			// Text deltas are forwarded to the streamer's `textDelta`,
+			// which the telegram adapter no-ops (rolling editMessageText
+			// can't keep up with token streams) and the web streamer
+			// turns into a `text_delta` envelope. Thinking and toolcall
+			// deltas are skipped here — they have dedicated UI elsewhere.
 			//
 			// `message_end` text is BUFFERED (not committed) because OMP fires
 			// one message_end per assistant message, and a turn typically
@@ -476,6 +492,20 @@ export class ChatSession {
 			// prose blocks are "preambles" the user doesn't need verbatim.
 			// We flush at the next tool_execution_start (as a one-line
 			// heartbeat) or at agent_end (as the full reply).
+			case "message_update": {
+				// Streaming token. Telegram's adapter drops it; web's
+				// streamer emits a `text_delta` envelope so the live
+				// bubble updates token-by-token. The SDK nests its
+				// AssistantMessageEvent under `assistantMessageEvent`;
+				// we only forward `text_delta` (skip thinking/toolcall
+				// deltas — those have dedicated UI elsewhere).
+				const ev = event as { assistantMessageEvent?: { type?: unknown; delta?: unknown } };
+				const inner = ev.assistantMessageEvent;
+				if (s && inner?.type === "text_delta" && typeof inner.delta === "string" && inner.delta.length > 0) {
+					s.textDelta(inner.delta);
+				}
+				break;
+			}
 			case "message_end": {
 				const msg = (event as { message?: { role?: string; content?: unknown } }).message;
 				if (!msg || msg.role !== "assistant") break;
@@ -504,12 +534,14 @@ export class ChatSession {
 				this.pendingAssistantText = undefined;
 				const line = renderToolStart(ev.toolName, ev.args);
 				const id = ev.toolCallId;
+				const toolName = ev.toolName;
+				const args = ev.args;
 				// Serialize preamble→tool so order is deterministic in chat,
 				// AND so endTurn's finalize() drains them before clearing
 				// toolMsgs / flipping `finalized`.
 				s.enqueue(async () => {
 					if (pre) await s.commitPreamble(pre);
-					await s.toolStart(id, line);
+					await s.toolStart(id, line, toolName, args);
 				});
 				if (ev.toolName === "task") {
 					// Capture the tasks[] array so subagent progress can be
@@ -542,7 +574,9 @@ export class ChatSession {
 					? renderToolEnd(ev.toolName, ev.result, true) || undefined
 					: undefined;
 				const toolCallId = ev.toolCallId;
-				s.enqueue(() => s.toolEnd(toolCallId, isError, errorLine));
+				const toolName = ev.toolName;
+				const result = ev.result;
+				s.enqueue(() => s.toolEnd(toolCallId, isError, errorLine, toolName, result));
 				if (ev.toolName === "task" && this.activeTask?.toolCallId === toolCallId) {
 					const keys = this.activeTask.keys.slice();
 					this.activeTask = undefined;
