@@ -8,7 +8,6 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { initOmpTheme, runLogRotation } from "./boot.ts";
-import { ChatStore } from "./chat-store.ts";
 import { WebBridge } from "./bridge/web/index.ts";
 import { startWebServer } from "./bridge/web/server.ts";
 import { scoped, logPath } from "./logger.ts";
@@ -34,6 +33,14 @@ function resolveDefaultCwd(): string {
 	return fallback;
 }
 
+/** Parse `OMPTG_WEB_ALLOWED_CWDS`: colon-separated path prefixes that
+ *  clients may use on `session.open` / `session.resume` in addition to
+ *  `DEFAULT_CWD`. Unset/empty means "DEFAULT_CWD subtree only". */
+function parseAllowedPrefixes(raw: string | undefined): string[] {
+	if (!raw) return [];
+	return raw.split(":").map(p => p.trim()).filter(Boolean).map(resolveDir);
+}
+
 const DEFAULT_CWD = resolveDefaultCwd();
 const HOST = Bun.env.OMPTG_WEB_HOST ?? "127.0.0.1";
 const PORT = Number(Bun.env.OMPTG_WEB_PORT ?? 7878);
@@ -41,9 +48,11 @@ const PORT = Number(Bun.env.OMPTG_WEB_PORT ?? 7878);
 await runLogRotation();
 await initOmpTheme();
 
-const chatStore = new ChatStore();
-const bridge = new WebBridge({ defaultCwd: DEFAULT_CWD });
-const running = startWebServer({ host: HOST, port: PORT, bridge, chatStore });
+const bridge = new WebBridge({
+	defaultCwd: DEFAULT_CWD,
+	allowedCwdPrefixes: parseAllowedPrefixes(Bun.env.OMPTG_WEB_ALLOWED_CWDS),
+});
+const running = startWebServer({ host: HOST, port: PORT, bridge });
 
 log.info("boot.ready", { host: HOST, port: PORT, cwd: DEFAULT_CWD, log: logPath() });
 

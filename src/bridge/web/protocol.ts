@@ -84,7 +84,7 @@ export type ServerMsg =
 	| { type: "session.removed"; key: string }
 	| { type: "session.event"; key: string; seq: number; event: SessionEvent }
 	| { type: "session.turn"; key: string; active: boolean }
-	| { type: "session.backfill"; key: string; from: number; events: Array<{ seq: number; event: SessionEvent }> }
+	| { type: "session.backfill"; key: string; from: number; earliestSeq: number; events: Array<{ seq: number; event: SessionEvent }> }
 	| { type: "ui.request"; key: string; reqId: string; req: UiRequestPayload & { awaitsText: boolean } }
 	| { type: "ui.cancel"; key: string; reqId: string }
 	| { type: "error"; message: string; cause?: string };

@@ -6,7 +6,6 @@
  *
  * Run: `bun run scripts/web-smoke.ts`
  */
-import { ChatStore } from "../src/chat-store.ts";
 import { WebBridge } from "../src/bridge/web/index.ts";
 import { startWebServer } from "../src/bridge/web/server.ts";
 import { initTheme } from "@oh-my-pi/pi-coding-agent";
@@ -20,8 +19,7 @@ await initTheme();
 const cwd = mkdtempSync(join(tmpdir(), "omptg-web-smoke-"));
 const stateFile = join(cwd, "web-sessions.json");
 const bridge = new WebBridge({ defaultCwd: cwd, stateFile });
-const chatStore = new ChatStore();
-const running = startWebServer({ host: "127.0.0.1", port: 0, bridge, chatStore });
+const running = startWebServer({ host: "127.0.0.1", port: 0, bridge });
 const addr = running.server.url;
 console.log("smoke: server at", addr.toString());
 

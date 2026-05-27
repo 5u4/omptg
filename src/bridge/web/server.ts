@@ -9,7 +9,6 @@
  */
 import type { Server, ServerWebSocket } from "bun";
 import { ChatSession } from "../../chat.ts";
-import { ChatStore } from "../../chat-store.ts";
 import { scoped } from "../../logger.ts";
 import type { ClientMsg, ServerMsg, SessionSummary } from "./protocol.ts";
 import { WebBridge } from "./index.ts";
@@ -28,7 +27,6 @@ export interface WebServerOptions {
 	host?: string;
 	port?: number;
 	bridge: WebBridge;
-	chatStore: ChatStore;
 }
 
 export interface RunningServer {
@@ -39,12 +37,22 @@ export interface RunningServer {
 export function startWebServer(opts: WebServerOptions): RunningServer {
 	const host = opts.host ?? "127.0.0.1";
 	const port = opts.port ?? 7878;
-	const { bridge, chatStore } = opts;
+	const { bridge } = opts;
 
 	/** Per-route ChatSession. Web routes are minted; ChatRegistry's
 	 *  telegram-shaped (chatId:threadId) keying doesn't apply, so we
 	 *  keep a direct map here. */
 	const chats = new Map<string, ChatSession>();
+
+	/** Per-route serialization tail for user-driven turns. Two concurrent
+	 *  ws clients firing session.send for the same route used to race
+	 *  inside ChatSession.prompt() — the second call overwrote the first
+	 *  turn's WebStreamer, leaving the first turn without a `finalize`
+	 *  envelope (subscribers waited forever). Chaining sends per route
+	 *  preserves the one-streamer-per-turn invariant and naturally lets
+	 *  the second send appear as a steer of the next turn rather than
+	 *  silently clobbering the in-flight one. */
+	const turnTails = new Map<string, Promise<void>>();
 
 	function getOrCreateChat(routeKey: string, cwd: string): ChatSession {
 		let chat = chats.get(routeKey);
@@ -76,8 +84,12 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 
 		switch (msg.type) {
 			case "session.open": {
+				const cwd = bridge.validateCwd(msg.cwd);
+				if (!cwd) {
+					state.send({ type: "error", message: `cwd not allowed: ${msg.cwd}` });
+					return;
+				}
 				const route = bridge.mintRoute();
-				const cwd = msg.cwd ?? bridge.defaultCwdValue();
 				const chat = getOrCreateChat(route.key, cwd);
 				// Eagerly ensure so session file exists for the summary.
 				try { await chat.ensure(); } catch (err) {
@@ -94,8 +106,12 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				break;
 			}
 			case "session.resume": {
+				const cwd = bridge.validateCwd(msg.cwd);
+				if (!cwd) {
+					state.send({ type: "error", message: `cwd not allowed: ${msg.cwd}` });
+					return;
+				}
 				const route = bridge.mintRoute();
-				const cwd = msg.cwd ?? bridge.defaultCwdValue();
 				const chat = getOrCreateChat(route.key, cwd);
 				try { await chat.resume(msg.sessionFile); } catch (err) {
 					state.send({ type: "error", message: "resume failed", cause: String(err) });
@@ -113,17 +129,17 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 			case "session.send": {
 				const chat = chats.get(msg.key);
 				if (!chat) { state.send({ type: "error", message: `unknown session ${msg.key}` }); return; }
-				try {
-					await chat.prompt(msg.text);
-					const s = await chat.ensure();
-					await s.waitForIdle();
-				} catch (err) {
-					log.error("turn.failed", { key: msg.key, err: String(err) });
-				} finally {
-					await chat.endTurn();
-					// Title may have been generated post-turn.
-					bridge.patchSession(msg.key, { title: chat.sessionName ?? "" });
-				}
+				// Chain after any in-flight turn for this route so two
+				// concurrent sends don't race inside ChatSession.prompt().
+				const prior = turnTails.get(msg.key) ?? Promise.resolve();
+				const next = prior.then(() => runOneTurn(chat, msg.key, msg.text));
+				turnTails.set(msg.key, next.finally(() => {
+					// Drop the tail entry only if no newer send has
+					// already replaced it.
+					if (turnTails.get(msg.key) === next) turnTails.delete(msg.key);
+				}));
+				// Don't await — handler returns immediately so the next
+				// ws message (e.g. an abort or ui.response) flows through.
 				break;
 			}
 			case "session.abort": {
@@ -145,7 +161,10 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 			case "ui.response": {
 				const chat = chats.get(msg.key);
 				if (!chat) return;
-				chat.resolvePending({ kind: "callback", requestId: msg.reqId, value: msg.value });
+				const ok = chat.resolvePending({ kind: "callback", requestId: msg.reqId, value: msg.value });
+				// Tell sibling subscribers the dialog is gone so they
+				// don't keep rendering the now-stale form.
+				if (ok) bridge.broadcastUiCancelFor(msg.key, msg.reqId);
 				break;
 			}
 			default:
@@ -159,6 +178,9 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 		fetch(req, server) {
 			const url = new URL(req.url);
 			if (url.pathname === "/ws") {
+				if (!isOriginAllowed(req.headers.get("origin"), host, port)) {
+					return new Response("forbidden origin", { status: 403 });
+				}
 				const state: WsState = {
 					id: nextWsId++,
 					subs: new Map(),
@@ -201,7 +223,6 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 	});
 
 	log.info("listen", { host, port });
-	void chatStore;
 
 	return {
 		server,
@@ -211,4 +232,48 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 			chats.clear();
 		},
 	};
+}
+
+/**
+ * Run one user turn end-to-end, surfacing a `replace` envelope on
+ * fatal failure. Without this, errors were only console-logged and
+ * subscribers saw `finalize` indistinguishable from success.
+ */
+async function runOneTurn(chat: ChatSession, key: string, text: string): Promise<void> {
+	try {
+		const streamer = await chat.prompt(text);
+		const s = await chat.ensure();
+		try {
+			await s.waitForIdle();
+		} catch (err) {
+			await streamer.replaceWith(`❌ turn failed: ${errMsg(err)}`);
+			throw err;
+		}
+	} catch (err) {
+		log.error("turn.failed", { key, err: String(err) });
+	} finally {
+		await chat.endTurn();
+	}
+}
+
+function errMsg(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Allow ws upgrades only from same-origin pages (and tools that don't
+ * send an Origin header at all — wscat, our own smoke). Binding to
+ * 127.0.0.1 doesn't prevent CSWSH: WebSocket connections are exempt
+ * from the same-origin policy, so any web page the user happens to
+ * visit could otherwise open ws://127.0.0.1:<port>/ws and drive the
+ * coding agent.
+ */
+function isOriginAllowed(origin: string | null, host: string, port: number): boolean {
+	if (!origin) return true; // non-browser client
+	const allowed = new Set([
+		`http://${host}:${port}`,
+		`http://localhost:${port}`,
+		`http://127.0.0.1:${port}`,
+	]);
+	return allowed.has(origin);
 }

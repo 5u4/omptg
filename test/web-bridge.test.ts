@@ -117,4 +117,115 @@ describe("WebBridge", () => {
 		const r2 = b2.mintRoute();
 		expect(r2.key).toBe("web:2");
 	});
+
+	it("backfill carries earliestSeq so the client can detect a ring-overflow gap", async () => {
+		// We don't push >500 events (that'd be slow); we instead
+		// subscribe with a `since` older than the ring's earliest seq
+		// to simulate the overflow window from the client's POV.
+		const b = makeBridge();
+		const r = b.mintRoute();
+		const t = b.open(r);
+		const streamer = t.newStreamer({});
+		await streamer.commitAssistant("first");
+		await streamer.commitAssistant("second");
+
+		const sub = makeSub();
+		b.addSubscriber(sub);
+		b.applySubscription(sub, [{ key: r.key, since: 0 }]);
+
+		const bf = sub.received.find(m => m.type === "session.backfill") as
+			| { type: "session.backfill"; from: number; earliestSeq: number; events: Array<{ seq: number }> }
+			| undefined;
+		expect(bf).toBeDefined();
+		expect(bf!.from).toBe(0);
+		expect(bf!.earliestSeq).toBe(1);
+		// gap detection: earliestSeq === from + 1 means no gap
+		expect(bf!.earliestSeq).toBe(bf!.from + 1);
+	});
+
+	it("late subscriber receives the current turn-active state via session.turn", async () => {
+		const b = makeBridge();
+		const r = b.mintRoute();
+		const t = b.open(r);
+		// Simulate a turn start before anyone subscribed.
+		t.typing.start();
+
+		const sub = makeSub();
+		b.addSubscriber(sub);
+		b.applySubscription(sub, [{ key: r.key }]);
+
+		const turn = sub.received.find(m => m.type === "session.turn") as
+			| { type: "session.turn"; active: boolean } | undefined;
+		expect(turn).toBeDefined();
+		expect(turn!.active).toBe(true);
+
+		// listSessions also reflects current turn state.
+		const list = b.listSessions();
+		expect(list[0]?.turnActive).toBe(true);
+
+		t.typing.stop();
+		// Drop the timer so afterEach doesn't fire late persist
+		await b.dispose();
+	});
+
+	it("patchSession with empty title does not clobber the existing title", () => {
+		const b = makeBridge();
+		const r = b.mintRoute();
+		b.open(r);
+		b.patchSession(r.key, { title: "generated" });
+		b.patchSession(r.key, { title: "" });   // post-turn patch before next title gen
+		expect(b.listSessions()[0]?.title).toBe("generated");
+	});
+
+	it("validateCwd accepts defaultCwd and rejects unrelated paths", () => {
+		const b = makeBridge();
+		// defaultCwd === tempDir per makeBridge
+		expect(b.validateCwd(undefined)).toBe(tempDir);
+		expect(b.validateCwd(tempDir)).toBe(tempDir);
+		expect(b.validateCwd(join(tempDir, "sub"))).toBe(join(tempDir, "sub"));
+		expect(b.validateCwd("/etc")).toBeUndefined();
+	});
+
+	it("validateCwd honors allowedCwdPrefixes for paths outside defaultCwd", () => {
+		const extra = mkdtempSync(join(tmpdir(), "omptg-extra-"));
+		try {
+			const b = new WebBridge({
+				defaultCwd: tempDir,
+				stateFile,
+				allowedCwdPrefixes: [extra],
+			});
+			live.push(b);
+			expect(b.validateCwd(extra)).toBe(extra);
+			expect(b.validateCwd(join(extra, "deep"))).toBe(join(extra, "deep"));
+			expect(b.validateCwd("/usr")).toBeUndefined();
+		} finally {
+			rmSync(extra, { recursive: true, force: true });
+		}
+	});
+
+	it("ui.cancel reaches sibling subscribers when one client resolves a ui.request", () => {
+		const b = makeBridge();
+		const r = b.mintRoute();
+		const t = b.open(r);
+		const a = makeSub();
+		const c = makeSub();
+		b.addSubscriber(a);
+		b.addSubscriber(c);
+		b.applySubscription(a, [{ key: r.key }]);
+		b.applySubscription(c, [{ key: r.key }]);
+
+		// Agent posts a select; both clients receive a ui.request envelope.
+		const p = t.ui.select("pick", ["a", "b"]);
+		const req = a.received.find(m => m.type === "ui.request") as
+			| { type: "ui.request"; reqId: string } | undefined;
+		expect(req).toBeDefined();
+		expect(c.received.find(m => m.type === "ui.request")).toBeDefined();
+
+		// One client resolves; the bridge fans out ui.cancel so siblings clear the form.
+		t.ui.resolve({ kind: "callback", requestId: req!.reqId, value: "a" });
+		b.broadcastUiCancelFor(r.key, req!.reqId);
+
+		expect(c.received.some(m => m.type === "ui.cancel" && m.reqId === req!.reqId)).toBe(true);
+		return p; // settle to keep the test runner happy
+	});
 });

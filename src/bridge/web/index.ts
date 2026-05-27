@@ -16,9 +16,9 @@
  *     on boot. Pure metadata — the actual session content lives in
  *     omp's jsonl.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath, sep } from "node:path";
 import type {
 	Bridge,
 	SessionRoute,
@@ -116,6 +116,11 @@ export interface WebBridgeOptions {
 	defaultCwd: string;
 	/** Override the persistence path (tests). */
 	stateFile?: string;
+	/** Extra cwd prefixes the server will accept from clients on
+	 *  `session.open` / `session.resume`. `defaultCwd` is always
+	 *  accepted; anything else must lie under one of these prefixes.
+	 *  Empty = `defaultCwd` only. */
+	allowedCwdPrefixes?: readonly string[];
 }
 
 export class WebBridge implements Bridge {
@@ -130,11 +135,16 @@ export class WebBridge implements Bridge {
 	private readonly rings = new Map<string, RingEntry[]>();
 	/** routeKey → monotonic sequence number for events. */
 	private readonly seqs = new Map<string, number>();
+	/** routeKey → last-known turn-active state. Mirrored to subscribers
+	 *  via `session.turn` events AND included in `listSessions()` so a
+	 *  late subscriber sees the current state. */
+	private readonly turnState = new Map<string, boolean>();
 	/** routeKey → transport (idempotent open). */
 	private readonly transports = new Map<string, WebTransport>();
 	/** Active subscribers. */
 	private readonly subscribers = new Set<Subscriber>();
 	private persistTimer: ReturnType<typeof setTimeout> | undefined;
+	private readonly allowedCwdPrefixes: readonly string[];
 
 	constructor(opts: WebBridgeOptions) {
 		this.defaultCwd = opts.defaultCwd;
@@ -142,6 +152,7 @@ export class WebBridge implements Bridge {
 		const loaded = loadState(this.stateFile);
 		this.nextId = loaded.nextId;
 		for (const s of loaded.sessions) this.sessions.set(s.key, s);
+		this.allowedCwdPrefixes = opts.allowedCwdPrefixes ?? [];
 	}
 
 	systemPromptAddendum(): string {
@@ -214,7 +225,7 @@ export class WebBridge implements Bridge {
 				title: s.title,
 				cwd: s.cwd,
 				lastActivity: s.lastActivity,
-				turnActive: false, // server tracks live; ring doesn't
+				turnActive: this.turnState.get(s.key) ?? false,
 				sessionFile: s.sessionFile,
 			}));
 	}
@@ -224,7 +235,12 @@ export class WebBridge implements Bridge {
 	patchSession(key: string, patch: Partial<PersistedSession>): void {
 		const cur = this.sessions.get(key);
 		if (!cur) return;
-		Object.assign(cur, patch, { lastActivity: Date.now() });
+		// Filter empty-string `title` so a post-turn patch that runs
+		// BEFORE title generation completes doesn't clobber an
+		// existing title with "".
+		const clean: Partial<PersistedSession> = { ...patch };
+		if (clean.title === "") delete clean.title;
+		Object.assign(cur, clean, { lastActivity: Date.now() });
 		this.schedulePersist();
 		this.broadcast({ type: "session.updated", key, patch: {
 			title: cur.title,
@@ -239,6 +255,7 @@ export class WebBridge implements Bridge {
 		this.transports.delete(key);
 		this.rings.delete(key);
 		this.seqs.delete(key);
+		this.turnState.delete(key);
 		this.schedulePersist();
 		this.broadcast({ type: "session.removed", key });
 	}
@@ -255,17 +272,31 @@ export class WebBridge implements Bridge {
 	applySubscription(sub: Subscriber, subs: Array<{ key: string; since?: number }>): void {
 		const nextSubs = new Map<string, number>();
 		for (const s of subs) {
-			nextSubs.set(s.key, s.since ?? 0);
+			const since = s.since ?? 0;
+			nextSubs.set(s.key, since);
 			const ring = this.rings.get(s.key) ?? [];
-			const tail = ring.filter(e => e.seq > (s.since ?? 0));
-			if (tail.length > 0) {
+			// Always send backfill (even if empty) so the client gets
+			// `earliestSeq` and can detect a ring-overflow gap:
+			// `earliestSeq > since + 1` means events were dropped.
+			const tail = ring.filter(e => e.seq > since);
+			const earliestSeq = ring.length > 0 ? ring[0]!.seq : (this.seqs.get(s.key) ?? 0) + 1;
+			if (tail.length > 0 || ring.length > 0) {
 				sub.send({
 					type: "session.backfill",
 					key: s.key,
-					from: s.since ?? 0,
+					from: since,
+					earliestSeq,
 					events: tail,
 				});
-				nextSubs.set(s.key, tail[tail.length - 1]!.seq);
+				if (tail.length > 0) {
+					nextSubs.set(s.key, tail[tail.length - 1]!.seq);
+				}
+			}
+			// Bring late subscribers up to date on turn-active state
+			// — otherwise tab-switch mid-turn shows a stale idle UI.
+			const active = this.turnState.get(s.key);
+			if (active !== undefined) {
+				sub.send({ type: "session.turn", key: s.key, active });
 			}
 		}
 		sub.subs = nextSubs;
@@ -291,6 +322,7 @@ export class WebBridge implements Bridge {
 	}
 
 	private broadcastTurn(key: string, active: boolean): void {
+		this.turnState.set(key, active);
 		this.fanout(key, { type: "session.turn", key, active });
 	}
 
@@ -300,6 +332,13 @@ export class WebBridge implements Bridge {
 
 	private broadcastUiCancel(key: string, reqId: string): void {
 		this.fanout(key, { type: "ui.cancel", key, reqId });
+	}
+
+	/** Public form of broadcastUiCancel for server-side resolution paths
+	 *  (when one ws client answers a ui.request, siblings need a cancel
+	 *  envelope so they stop rendering the stale form). */
+	broadcastUiCancelFor(key: string, reqId: string): void {
+		this.broadcastUiCancel(key, reqId);
 	}
 
 	private fanout(key: string, msg: ServerMsg): void {
@@ -334,10 +373,33 @@ export class WebBridge implements Bridge {
 				nextId: this.nextId,
 				sessions: [...this.sessions.values()],
 			};
-			writeFileSync(this.stateFile, JSON.stringify(state, null, 2));
+			// Atomic: write to a sibling tmp then rename. A torn write
+			// or SIGKILL between the writeFileSync and renameSync
+			// leaves the previous good state on disk; without this a
+			// crash mid-write empties the file and loadState resets
+			// every session.
+			const tmp = `${this.stateFile}.tmp`;
+			writeFileSync(tmp, JSON.stringify(state, null, 2));
+			renameSync(tmp, this.stateFile);
 		} catch (err) {
 			log.warn("persist_failed", { err: String(err) });
 		}
+	}
+
+	/** Validate a client-supplied cwd against `allowedCwdPrefixes`
+	 *  (defaultCwd is always allowed). Returns the resolved absolute
+	 *  path on success, undefined on rejection. */
+	validateCwd(cwd: string | undefined): string | undefined {
+		if (!cwd || cwd === this.defaultCwd) return this.defaultCwd;
+		// Reject relative paths outright; we resolve client input only
+		// to canonicalize `..` segments before prefix-matching.
+		const resolved = resolvePath(cwd);
+		if (resolved === this.defaultCwd) return resolved;
+		if (isUnderPrefix(resolved, this.defaultCwd)) return resolved;
+		for (const p of this.allowedCwdPrefixes) {
+			if (resolved === p || isUnderPrefix(resolved, p)) return resolved;
+		}
+		return undefined;
 	}
 }
 
@@ -358,4 +420,12 @@ function loadState(path: string): PersistedState {
 		log.warn("load_failed", { err: String(err), path });
 	}
 	return { version: 1, nextId: 1, sessions: [] };
+}
+
+/** Path-prefix check: true when `path` equals `prefix` or is nested
+ *  beneath it (separator-aware so `/a/bcd` is NOT under `/a/b`). */
+function isUnderPrefix(path: string, prefix: string): boolean {
+	if (path === prefix) return true;
+	const withSep = prefix.endsWith(sep) ? prefix : prefix + sep;
+	return path.startsWith(withSep);
 }
