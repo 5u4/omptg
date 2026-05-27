@@ -8,10 +8,40 @@
  * explicitly out of scope.
  */
 import type { Server, ServerWebSocket } from "bun";
+import { join } from "node:path";
 import { ChatSession } from "../../chat.ts";
 import { scoped } from "../../logger.ts";
 import type { ClientMsg, ServerMsg, SessionSummary } from "./protocol.ts";
 import { WebBridge } from "./index.ts";
+
+const STATIC_DIR = join(import.meta.dir, "static");
+
+const MIME: Record<string, string> = {
+	".html": "text/html; charset=utf-8",
+	".js": "text/javascript; charset=utf-8",
+	".css": "text/css; charset=utf-8",
+	".svg": "image/svg+xml",
+	".ico": "image/x-icon",
+};
+
+/**
+ * Serve a single static file out of src/bridge/web/static. Returns null
+ * for unmatched paths so the caller can 404. Path traversal is rejected
+ * by requiring the resolved file to stay under STATIC_DIR.
+ */
+async function serveStatic(pathname: string): Promise<Response | null> {
+	const rel = pathname === "/" ? "/index.html" : pathname;
+	// Reject absolute-escape and `..` segments: `Bun.file(join(dir, rel))`
+	// would happily walk out of STATIC_DIR otherwise.
+	if (rel.includes("..") || rel.includes("\0")) return null;
+	const path = join(STATIC_DIR, rel);
+	if (!path.startsWith(STATIC_DIR)) return null;
+	const file = Bun.file(path);
+	if (!(await file.exists())) return null;
+	const ext = (rel.match(/\.[a-z0-9]+$/i)?.[0] ?? "").toLowerCase();
+	const type = MIME[ext] ?? "application/octet-stream";
+	return new Response(file, { headers: { "content-type": type } });
+}
 
 const log = scoped("web-server");
 
@@ -147,7 +177,7 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				const cwd = r.cwd;
 				const route = bridge.mintRoute();
 				const chat = getOrCreateChat(route.key, cwd);
-				try { await chat.ensure(); } catch (err) {
+				try { await chat.newSession(); } catch (err) {
 					state.send({ type: "error", message: "failed to open session", cause: String(err) });
 					await cleanupRoute(route.key);
 					return;
@@ -259,7 +289,7 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 	const server = Bun.serve<WsState>({
 		hostname: host,
 		port,
-		fetch(req, server) {
+		async fetch(req, server) {
 			const url = new URL(req.url);
 			if (url.pathname === "/ws") {
 				if (!isOriginAllowed(req.headers.get("origin"), host, port)) {
@@ -277,10 +307,9 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 			if (url.pathname === "/health") {
 				return Response.json({ ok: true, sessions: bridge.listSessions().length });
 			}
-			// Phase 3 will serve static frontend here.
-			return new Response("omptg web bridge\n", {
-				headers: { "content-type": "text/plain" },
-			});
+			const staticResp = await serveStatic(url.pathname);
+			if (staticResp) return staticResp;
+			return new Response("not found", { status: 404 });
 		},
 		websocket: {
 			open(ws: ServerWebSocket<WsState>) {
