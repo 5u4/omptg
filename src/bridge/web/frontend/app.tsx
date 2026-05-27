@@ -6,10 +6,11 @@
  * directly so token deltas only re-render the live bubble subtree
  * rather than the whole stream.
  *
- * Auto-scroll follows the standard chat-app pattern: stick to bottom
- * unless the user has scrolled up, then surface a "jump to latest"
- * affordance. Reconnect uses the protocol's `since`/`earliestSeq` for
- * gap detection.
+ * Auto-scroll sticks to the bottom unless the user has scrolled up;
+ * a manual scroll-down re-attaches. (No explicit "jump to latest"
+ * button — keep this in mind if you find yourself looking for one.)
+ * Reconnect uses the protocol's `since`/`earliestSeq` for gap
+ * detection.
  */
 import { h, render, type VNode } from "preact";
 import { useEffect, useRef } from "preact/hooks";
@@ -150,6 +151,29 @@ function resortSessions(): void {
 
 // --- event → display row reducer -----------------------------------------
 
+/** Event kinds that surface to the user as a discrete "message"
+ *  worth counting toward the unread badge. Streaming token deltas and
+ *  subagent row updates are excluded — they're sub-message noise. */
+const UNREAD_WORTHY = new Set<SessionEvent["kind"]>([
+	"assistant", "preamble", "notice", "replace", "tool_start",
+]);
+function isUnreadWorthy(kind: SessionEvent["kind"]): boolean {
+	return UNREAD_WORTHY.has(kind);
+}
+
+/** Event kinds that represent real session motion — used for both the
+ *  rail's activity sort key and the unread bump. Excludes text_delta
+ *  (would resort on every token) and subagent_line/_collapse (sub-tool
+ *  noise that doesn't change the rail's top-level state). */
+const MOTION = new Set<SessionEvent["kind"]>([
+	"assistant", "preamble", "notice", "replace",
+	"tool_start", "tool_end", "finalize",
+]);
+function isMotion(kind: SessionEvent["kind"]): boolean {
+	return MOTION.has(kind);
+}
+
+
 /** Apply a SessionEvent to a session. Mutates the session's signals.
  *
  *  `isLive` distinguishes a freshly-arrived event from a backfilled
@@ -160,9 +184,16 @@ function resortSessions(): void {
  *  its event history. */
 function applyEvent(session: Session, seq: number, ev: SessionEvent, isLive: boolean): void {
 	session.lastSeq = Math.max(session.lastSeq, seq);
-	if (isLive) {
+	if (isLive && isMotion(ev.kind)) {
+		// Update lastActivity (rail sort key) only on motion-level
+		// events. text_delta would otherwise resort the rail on every
+		// token, hammering the DOM during streaming.
 		session.lastActivity.value = Date.now();
-		if (activeKey.value !== session.key) {
+		resortSessions();
+		// Bump unread only on user-perceptible events for inactive
+		// tabs. Counting every text_delta would let one streaming reply
+		// land hundreds of "unread" on an inactive tab.
+		if (activeKey.value !== session.key && isUnreadWorthy(ev.kind)) {
 			session.unread.value = session.unread.value + 1;
 		}
 	}
@@ -447,14 +478,19 @@ function SessionItem({ session }: { session: Session }): VNode {
 	const cwdParts = session.cwd.value.split(/[/\\]/).filter(Boolean);
 	const cwd = cwdParts.slice(-2).join("/") || session.cwd.value;
 	return html`
-		<div class="session-item ${active ? "active" : ""}" onClick=${() => selectSession(session.key)}>
+		<button
+			type="button"
+			class="session-item ${active ? "active" : ""}"
+			aria-current=${active ? "true" : "false"}
+			onClick=${() => selectSession(session.key)}
+		>
 			<div class="meta">
 				<div class="title">${title}</div>
 				<div class="cwd">${cwd}</div>
 			</div>
-			${unread > 0 && !active ? html`<div class="unread">${unread}</div>` : null}
-			${turn ? html`<div class="turn-pulse" title="turn active"></div>` : null}
-		</div>
+			${unread > 0 && !active ? html`<div class="unread" aria-label=${`${unread} unread`}>${unread}</div>` : null}
+			${turn ? html`<div class="turn-pulse" aria-label="turn active" title="turn active"></div>` : null}
+		</button>
 	`;
 }
 
@@ -560,13 +596,18 @@ function ToolCard({ toolCallId, session }: { toolCallId: string; session: Sessio
 	const toggle = (): void => { t.expanded = !t.expanded; bumpEvents(session); };
 	return html`
 		<div class="tool ${status}">
-			<div class="tool-header ${t.expanded ? "open" : ""}" onClick=${toggle}>
+			<button
+				type="button"
+				class="tool-header ${t.expanded ? "open" : ""}"
+				aria-expanded=${t.expanded ? "true" : "false"}
+				onClick=${toggle}
+			>
 				${!t.done
 					? html`<span class="spinner"></span>`
 					: html`<span class="icon">${t.isError ? "❌" : "✓"}</span>`}
 				<div class="label">${t.line}</div>
 				<span class="chevron">▶</span>
-			</div>
+			</button>
 			${t.subagents.size > 0 ? html`
 				<div class="subagents">
 					${[...t.subagents.entries()].map(([k, line]) => html`<div class="subagent-row" key=${k}>${line}</div>`)}

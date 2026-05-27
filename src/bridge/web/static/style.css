@@ -104,6 +104,14 @@ a:hover { text-decoration: underline; }
 }
 
 .session-item {
+	/* Rendered as a <button> for keyboard accessibility — reset the
+	 * default button styling so it still looks like a list row. */
+	appearance: none;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	width: 100%;
 	padding: 8px 10px;
 	margin: 2px 0;
 	border-radius: 6px;
@@ -114,6 +122,7 @@ a:hover { text-decoration: underline; }
 	gap: 8px;
 	align-items: flex-start;
 }
+.session-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .session-item:hover { background: var(--bg-elev-2); }
 .session-item.active {
 	background: var(--bg-elev-2);
@@ -298,6 +307,15 @@ a:hover { text-decoration: underline; }
 .tool.ok { border-left-color: var(--ok); }
 
 .tool-header {
+	/* Rendered as a <button> for keyboard accessibility. */
+	appearance: none;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	width: 100%;
+	border: 0;
+	border-bottom: 1px solid transparent;
 	padding: 6px 10px;
 	display: flex;
 	align-items: center;
@@ -305,6 +323,7 @@ a:hover { text-decoration: underline; }
 	cursor: pointer;
 	user-select: none;
 }
+.tool-header:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .tool-header:hover { background: var(--bg-elev-2); }
 .tool-header .label {
 	flex: 1;
@@ -410,22 +429,6 @@ a:hover { text-decoration: underline; }
 }
 .composer .send:hover { filter: brightness(1.1); }
 .composer .send:disabled { background: var(--bg-elev-2); color: var(--fg-faint); border-color: var(--border); }
-
-/* --- jump to bottom button ------------------------------------------- */
-
-.jump-to-bottom {
-	position: absolute;
-	right: 24px;
-	bottom: 90px;
-	background: var(--accent-dim);
-	color: var(--fg);
-	border: 1px solid var(--accent);
-	border-radius: 999px;
-	padding: 6px 14px;
-	font-size: 12px;
-	cursor: pointer;
-	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-}
 
 /* --- narrow viewport -------------------------------------------------- */
 

@@ -7,6 +7,11 @@
     "moduleDetection": "force",
     "jsx": "react-jsx",
     "jsxImportSource": "preact",
+    // No automatic `@types/*` inclusion. Without this,
+    // `@types/bun` (installed for the server tsconfig) would leak
+    // Bun/Node globals into the frontend typecheck and let DOM-only
+    // code accidentally reach for `Bun.file` / `process.env` / etc.
+    "types": [],
 
     // Bundler mode (esbuild handles the actual emit).
     "moduleResolution": "bundler",

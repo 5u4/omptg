@@ -1,14 +1,37 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { build } from "esbuild";
 import { WebBridge } from "../src/bridge/web/index.ts";
 import { startWebServer, type RunningServer } from "../src/bridge/web/server.ts";
+
+const STATIC_APP_JS = join(import.meta.dir, "..", "src", "bridge", "web", "static", "app.js");
 
 let tempDir: string;
 let stateFile: string;
 let bridge: WebBridge | undefined;
 let running: RunningServer | undefined;
+
+beforeAll(async () => {
+	// static/app.js is gitignored (built by scripts/build-web.ts).
+	// Build it on demand if absent so the test suite stays green on a
+	// fresh clone / CI.
+	if (!existsSync(STATIC_APP_JS)) {
+		await build({
+			entryPoints: ["src/bridge/web/frontend/app.tsx"],
+			outfile: STATIC_APP_JS,
+			bundle: true,
+			format: "esm",
+			target: "es2022",
+			minify: true,
+			jsx: "automatic",
+			jsxImportSource: "preact",
+			logLevel: "silent",
+		});
+	}
+});
+
 
 beforeEach(() => {
 	tempDir = realpathSync(mkdtempSync(join(tmpdir(), "omptg-static-")));

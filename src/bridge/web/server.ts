@@ -8,7 +8,7 @@
  * explicitly out of scope.
  */
 import type { Server, ServerWebSocket } from "bun";
-import { join } from "node:path";
+import { join, relative, resolve as resolvePath } from "node:path";
 import { ChatSession } from "../../chat.ts";
 import { scoped } from "../../logger.ts";
 import type { ClientMsg, ServerMsg, SessionSummary } from "./protocol.ts";
@@ -25,18 +25,23 @@ const MIME: Record<string, string> = {
 };
 
 /**
- * Serve a single static file out of src/bridge/web/static. Returns null
- * for unmatched paths so the caller can 404. Path traversal is rejected
- * by requiring the resolved file to stay under STATIC_DIR.
+ * Serve a single static file out of src/bridge/web/static. Returns
+ * null for unmatched paths so the caller can 404. Path-traversal
+ * defense is in depth:
+ *   1. Reject obvious `..` / NUL segments in the raw rel path.
+ *   2. After joining, verify path.relative(STATIC_DIR, resolved)
+ *      doesn't start with `..` or hit absolute — that's the only
+ *      separator-correct way to confirm a path is under a directory.
+ *      (Naive `startsWith(STATIC_DIR)` would mis-match `/foo` against
+ *      `/foobar/dir` if STATIC_DIR ever lacked a trailing separator.)
  */
 async function serveStatic(pathname: string): Promise<Response | null> {
 	const rel = pathname === "/" ? "/index.html" : pathname;
-	// Reject absolute-escape and `..` segments: `Bun.file(join(dir, rel))`
-	// would happily walk out of STATIC_DIR otherwise.
 	if (rel.includes("..") || rel.includes("\0")) return null;
-	const path = join(STATIC_DIR, rel);
-	if (!path.startsWith(STATIC_DIR)) return null;
-	const file = Bun.file(path);
+	const resolved = resolvePath(STATIC_DIR, "." + rel);
+	const inside = relative(STATIC_DIR, resolved);
+	if (inside === "" || inside.startsWith("..") || resolvePath(inside) === inside) return null;
+	const file = Bun.file(resolved);
 	if (!(await file.exists())) return null;
 	const ext = (rel.match(/\.[a-z0-9]+$/i)?.[0] ?? "").toLowerCase();
 	const type = MIME[ext] ?? "application/octet-stream";
