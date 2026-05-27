@@ -41,9 +41,39 @@ function parseAllowedPrefixes(raw: string | undefined): string[] {
 	return raw.split(":").map(p => p.trim()).filter(Boolean).map(resolveDir);
 }
 
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+
+/** Default 127.0.0.1; allow override but loudly warn when the user
+ *  picks a non-loopback interface — phase 2 has no auth, so binding
+ *  to 0.0.0.0 / a LAN IP exposes the agent to anyone on the network. */
+function resolveHost(raw: string | undefined): string {
+	if (!raw) return "127.0.0.1";
+	if (!LOOPBACK_HOSTS.has(raw)) {
+		console.warn(
+			`[omptg-web] OMPTG_WEB_HOST=${raw} is NOT a loopback address; ` +
+			`the web bridge has no auth and will be reachable by anyone ` +
+			`who can connect to ${raw}:<port>. Set OMPTG_WEB_HOST=127.0.0.1 ` +
+			`(default) for local-only use.`,
+		);
+	}
+	return raw;
+}
+
+/** Reject NaN / out-of-range ports so the user gets a clear error
+ *  instead of `Bun.serve` failing with an opaque "invalid port". */
+function resolvePort(raw: string | undefined): number {
+	if (!raw) return 7878;
+	const n = Number(raw);
+	if (!Number.isInteger(n) || n < 1 || n > 65535) {
+		throw new Error(`OMPTG_WEB_PORT must be an integer in [1, 65535]; got "${raw}"`);
+	}
+	return n;
+}
+
+
 const DEFAULT_CWD = resolveDefaultCwd();
-const HOST = Bun.env.OMPTG_WEB_HOST ?? "127.0.0.1";
-const PORT = Number(Bun.env.OMPTG_WEB_PORT ?? 7878);
+const HOST = resolveHost(Bun.env.OMPTG_WEB_HOST);
+const PORT = resolvePort(Bun.env.OMPTG_WEB_PORT);
 
 await runLogRotation();
 await initOmpTheme();

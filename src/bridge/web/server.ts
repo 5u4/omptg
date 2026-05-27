@@ -72,6 +72,36 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 		return chat;
 	}
 
+
+	/**
+	 * Get a live ChatSession for `routeKey`, rehydrating from disk if
+	 * the server was restarted and the session is only known via the
+	 * persisted summary (cwd + sessionFile). Returns undefined when no
+	 * such session exists at all. Resume failures (e.g. the jsonl was
+	 * moved) drop the persisted entry and return undefined — the
+	 * client will see `session.removed` next subscribe.
+	 */
+	async function getOrRehydrate(routeKey: string): Promise<ChatSession | undefined> {
+		const live = chats.get(routeKey);
+		if (live) return live;
+		const summary = summaryFor(routeKey);
+		if (!summary) return undefined;
+		const cwdCheck = bridge.resolveCwd(summary.cwd);
+		const cwd = cwdCheck.ok ? cwdCheck.cwd : summary.cwd;
+		const chat = getOrCreateChat(routeKey, cwd);
+		if (summary.sessionFile) {
+			try {
+				await chat.resume(summary.sessionFile);
+			} catch (err) {
+				log.warn("rehydrate.resume_failed", { key: routeKey, err: String(err) });
+				chats.delete(routeKey);
+				await chat.dispose().catch(() => {});
+				bridge.removeSession(routeKey);
+				return undefined;
+			}
+		}
+		return chat;
+	}
 	function summaryFor(routeKey: string): SessionSummary | undefined {
 		const all = bridge.listSessions();
 		return all.find(s => s.key === routeKey);
@@ -84,14 +114,14 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 
 		switch (msg.type) {
 			case "session.open": {
-				const cwd = bridge.validateCwd(msg.cwd);
-				if (!cwd) {
-					state.send({ type: "error", message: `cwd not allowed: ${msg.cwd}` });
+				const r = bridge.resolveCwd(msg.cwd);
+				if (!r.ok) {
+					state.send({ type: "error", message: `cwd ${r.reason}: ${msg.cwd ?? "<default>"}` });
 					return;
 				}
+				const cwd = r.cwd;
 				const route = bridge.mintRoute();
 				const chat = getOrCreateChat(route.key, cwd);
-				// Eagerly ensure so session file exists for the summary.
 				try { await chat.ensure(); } catch (err) {
 					state.send({ type: "error", message: "failed to open session", cause: String(err) });
 					return;
@@ -100,17 +130,19 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 					cwd,
 					sessionFile: chat.sessionFile,
 					title: chat.sessionName ?? "",
+					modelId: chat.modelId,
 				});
 				const s = summaryFor(route.key);
 				if (s) state.send({ type: "session.created", session: s });
 				break;
 			}
 			case "session.resume": {
-				const cwd = bridge.validateCwd(msg.cwd);
-				if (!cwd) {
-					state.send({ type: "error", message: `cwd not allowed: ${msg.cwd}` });
+				const r = bridge.resolveCwd(msg.cwd);
+				if (!r.ok) {
+					state.send({ type: "error", message: `cwd ${r.reason}: ${msg.cwd ?? "<default>"}` });
 					return;
 				}
+				const cwd = r.cwd;
 				const route = bridge.mintRoute();
 				const chat = getOrCreateChat(route.key, cwd);
 				try { await chat.resume(msg.sessionFile); } catch (err) {
@@ -121,18 +153,29 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 					cwd: chat.cwd,
 					sessionFile: chat.sessionFile,
 					title: chat.sessionName ?? "",
+					modelId: chat.modelId,
 				});
 				const s = summaryFor(route.key);
 				if (s) state.send({ type: "session.created", session: s });
 				break;
 			}
 			case "session.send": {
-				const chat = chats.get(msg.key);
+				const chat = await getOrRehydrate(msg.key);
 				if (!chat) { state.send({ type: "error", message: `unknown session ${msg.key}` }); return; }
 				// Chain after any in-flight turn for this route so two
 				// concurrent sends don't race inside ChatSession.prompt().
 				const prior = turnTails.get(msg.key) ?? Promise.resolve();
-				const next = prior.then(() => runOneTurn(chat, msg.key, msg.text));
+				const next = prior.then(async () => {
+					await runOneTurn(chat, msg.key, msg.text);
+					// Title / modelId may have changed during the turn
+					// (auto title-gen, /model command from a future
+					// slash-command layer). Patch so the session list
+					// stays in sync.
+					bridge.patchSession(msg.key, {
+						title: chat.sessionName ?? "",
+						modelId: chat.modelId,
+					});
+				});
 				turnTails.set(msg.key, next.finally(() => {
 					// Drop the tail entry only if no newer send has
 					// already replaced it.
@@ -143,7 +186,7 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				break;
 			}
 			case "session.abort": {
-				const chat = chats.get(msg.key);
+				const chat = await getOrRehydrate(msg.key);
 				if (chat) await chat.abort();
 				break;
 			}
@@ -159,7 +202,7 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				break;
 			}
 			case "ui.response": {
-				const chat = chats.get(msg.key);
+				const chat = await getOrRehydrate(msg.key);
 				if (!chat) return;
 				const ok = chat.resolvePending({ kind: "callback", requestId: msg.reqId, value: msg.value });
 				// Tell sibling subscribers the dialog is gone so they

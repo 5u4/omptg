@@ -39,6 +39,9 @@ function freshId(): string {
 export interface WebUiHooks {
 	postRequest(reqId: string, req: UiRequestPayload, awaitsText: boolean): void;
 	cancelRequest(reqId: string): void;
+	/** Fan out an out-of-band notification (extension/tool called
+	 *  `ui.notify`) as a `notice` SessionEvent. */
+	postNotice(level: "info" | "warning" | "error", text: string): void;
 }
 
 export class WebUI implements InteractiveUI {
@@ -189,9 +192,10 @@ export class WebUI implements InteractiveUI {
 
 	notify(message: string, type: "info" | "warning" | "error" = "info"): void {
 		this.log.info("notify", { type, message });
-		// Frontend gets these as a `notice` SessionEvent via the
-		// streamer path when the agent emits them; out-of-band notify()
-		// from tool code is logged here and surfaced on next stream.
+		// Fan out as a `notice` SessionEvent so subscribers actually
+		// see the message; without this, an extension-fired notify()
+		// would silently only hit the server log.
+		this.hooks.postNotice(type, message);
 	}
 
 	// --- long tail (no-op, mirror TelegramUI) ------------------------------

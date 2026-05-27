@@ -8,14 +8,16 @@ interface PostedRequest {
 	awaitsText: boolean;
 }
 
-function makeUi(): { ui: WebUI; posted: PostedRequest[]; cancelled: string[] } {
+function makeUi(): { ui: WebUI; posted: PostedRequest[]; cancelled: string[]; notices: Array<{ level: string; text: string }> } {
 	const posted: PostedRequest[] = [];
 	const cancelled: string[] = [];
+	const notices: Array<{ level: string; text: string }> = [];
 	const ui = new WebUI("web:1", {
 		postRequest: (reqId, req, awaitsText) => posted.push({ reqId, req, awaitsText }),
 		cancelRequest: reqId => cancelled.push(reqId),
+		postNotice: (level, text) => notices.push({ level, text }),
 	});
-	return { ui, posted, cancelled };
+	return { ui, posted, cancelled, notices };
 }
 
 describe("WebUI dialogs", () => {
@@ -100,5 +102,15 @@ describe("WebUI dialogs", () => {
 		expect(ok).toBe(false);
 		ui.resolve({ kind: "callback", requestId: posted[0]!.reqId, value: null });
 		expect(await p).toBeUndefined();
+	});
+
+	it("notify emits a notice via the postNotice hook", () => {
+		const { ui, notices } = makeUi();
+		ui.notify("heads up", "warning");
+		ui.notify("plain info");
+		expect(notices).toEqual([
+			{ level: "warning", text: "heads up" },
+			{ level: "info", text: "plain info" },
+		]);
 	});
 });

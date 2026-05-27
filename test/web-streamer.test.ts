@@ -97,4 +97,16 @@ describe("WebStreamer envelope shapes", () => {
 		streamer.textDelta("dropped");
 		expect(events).toEqual([{ kind: "replace", text: "turn failed" }]);
 	});
+
+	it("enqueue swallows task failures so the chain isn't poisoned", async () => {
+		const { events, streamer } = capture();
+		// First task throws; subsequent tasks must still run.
+		streamer.enqueue(async () => { throw new Error("boom"); });
+		streamer.enqueue(async () => { await streamer.commitAssistant("after"); });
+		await streamer.finalize();
+		expect(events).toEqual([
+			{ kind: "assistant", text: "after" },
+			{ kind: "finalize" },
+		]);
+	});
 });

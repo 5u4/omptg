@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebBridge } from "../src/bridge/web/index.ts";
@@ -227,5 +227,45 @@ describe("WebBridge", () => {
 
 		expect(c.received.some(m => m.type === "ui.cancel" && m.reqId === req!.reqId)).toBe(true);
 		return p; // settle to keep the test runner happy
+	});
+
+	it("resolveCwd reports denied / missing / not-a-directory", () => {
+		const b = makeBridge();
+		expect(b.resolveCwd(undefined)).toEqual({ ok: true, cwd: tempDir });
+		expect(b.resolveCwd(tempDir)).toEqual({ ok: true, cwd: tempDir });
+		expect(b.resolveCwd("/this/path/should/not/exist")).toEqual({ ok: false, reason: "denied" });
+
+		// A path under defaultCwd that doesn't exist on disk → missing
+		const missing = join(tempDir, "nope");
+		expect(b.resolveCwd(missing)).toEqual({ ok: false, reason: "missing" });
+
+		// A regular file under defaultCwd → not-a-directory
+		const file = join(tempDir, "f");
+		writeFileSync(file, "x");
+		expect(b.resolveCwd(file)).toEqual({ ok: false, reason: "not-a-directory" });
+	});
+
+	it("modelId is broadcast on patchSession and surfaces in listSessions", () => {
+		const b = makeBridge();
+		const r = b.mintRoute();
+		b.open(r);
+		const sub = makeSub();
+		b.addSubscriber(sub);
+		b.patchSession(r.key, { modelId: "claude-3-5-sonnet" });
+
+		expect(b.listSessions()[0]?.modelId).toBe("claude-3-5-sonnet");
+		const updates = sub.received.filter(m => m.type === "session.updated") as Array<{ patch: { modelId?: string } }>;
+		expect(updates[updates.length - 1]?.patch.modelId).toBe("claude-3-5-sonnet");
+	});
+
+	it("modelId round-trips through persistence", async () => {
+		const b1 = makeBridge();
+		const r = b1.mintRoute();
+		b1.open(r);
+		b1.patchSession(r.key, { modelId: "gpt-5" });
+		await b1.dispose();
+
+		const b2 = makeBridge();
+		expect(b2.listSessions()[0]?.modelId).toBe("gpt-5");
 	});
 });

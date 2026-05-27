@@ -12,6 +12,9 @@
  */
 import type { Streamer } from "../types.ts";
 import type { SessionEvent } from "./protocol.ts";
+import { scoped } from "../../logger.ts";
+
+const log = scoped("web-streamer");
 
 export type PublishFn = (event: SessionEvent) => void;
 
@@ -26,8 +29,11 @@ export class WebStreamer implements Streamer {
 	constructor(private readonly publish: PublishFn) {}
 
 	enqueue(task: () => Promise<void>): void {
-		this.tail = this.tail.then(task).catch(() => {
-			// Swallow: one bad commit must not poison the chain.
+		this.tail = this.tail.then(task).catch(err => {
+			// Don't rethrow: one bad commit must not poison the chain,
+			// but log so silent UI events have a paper trail (mirrors
+			// TelegramStreamer.enqueue.task_failed).
+			log.warn("enqueue.task_failed", { err: err instanceof Error ? err.message : String(err) });
 		});
 	}
 

@@ -16,7 +16,7 @@
  *     on boot. Pure metadata — the actual session content lives in
  *     omp's jsonl.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath, sep } from "node:path";
 import type {
@@ -67,6 +67,7 @@ interface PersistedSession {
 	cwd: string;
 	sessionFile?: string;
 	title: string;
+	modelId?: string;
 	lastActivity: number;
 }
 
@@ -96,6 +97,7 @@ class WebTransport implements SessionTransport {
 		this.ui = new WebUI(route.key, {
 			postRequest: this.postUiRequest,
 			cancelRequest: this.cancelUiRequest,
+			postNotice: (level, text) => this.publish({ kind: "notice", text: `[${level}] ${text}` }),
 		});
 		this.typing = new WebTyping(this.setTurn);
 	}
@@ -224,6 +226,7 @@ export class WebBridge implements Bridge {
 				key: s.key,
 				title: s.title,
 				cwd: s.cwd,
+				modelId: s.modelId,
 				lastActivity: s.lastActivity,
 				turnActive: this.turnState.get(s.key) ?? false,
 				sessionFile: s.sessionFile,
@@ -246,6 +249,7 @@ export class WebBridge implements Bridge {
 			title: cur.title,
 			cwd: cur.cwd,
 			sessionFile: cur.sessionFile,
+			modelId: cur.modelId,
 			lastActivity: cur.lastActivity,
 		} });
 	}
@@ -400,6 +404,22 @@ export class WebBridge implements Bridge {
 			if (resolved === p || isUnderPrefix(resolved, p)) return resolved;
 		}
 		return undefined;
+	}
+
+	/** Stricter form of validateCwd: also stat-checks the resolved path
+	 *  so the server can surface a specific "no such directory" /
+	 *  "not a directory" error instead of a generic chat.ensure() failure
+	 *  several layers down. */
+	resolveCwd(cwd: string | undefined): { ok: true; cwd: string } | { ok: false; reason: "denied" | "missing" | "not-a-directory" } {
+		const allowed = this.validateCwd(cwd);
+		if (!allowed) return { ok: false, reason: "denied" };
+		if (!existsSync(allowed)) return { ok: false, reason: "missing" };
+		try {
+			if (!statSync(allowed).isDirectory()) return { ok: false, reason: "not-a-directory" };
+		} catch {
+			return { ok: false, reason: "missing" };
+		}
+		return { ok: true, cwd: allowed };
 	}
 }
 
