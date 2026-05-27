@@ -458,6 +458,11 @@ export class ChatSession {
 		const s = this.streamer;
 		if (s && final) s.enqueue(() => s.commitAssistant(final));
 		await s?.finalize();
+		// Clear the slot so `currentStreamer` actually means
+		// "in-flight turn" instead of leaving the finalized instance
+		// around for the next observer. dispose() clears it too, but
+		// endTurn is the normal-path exit and runs first.
+		if (this.streamer === s) this.streamer = undefined;
 	}
 
 	/** Forward UI pending-request resolution from callback or text reply. */

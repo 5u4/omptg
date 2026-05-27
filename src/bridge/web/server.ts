@@ -18,7 +18,7 @@ const log = scoped("web-server");
 interface WsState {
 	id: number;
 	send(msg: ServerMsg): void;
-	subs: Map<string, number>;
+	subs: Set<string>;
 }
 
 let nextWsId = 1;
@@ -87,8 +87,21 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 		const summary = summaryFor(routeKey);
 		if (!summary) return undefined;
 		const cwdCheck = bridge.resolveCwd(summary.cwd);
-		const cwd = cwdCheck.ok ? cwdCheck.cwd : summary.cwd;
-		const chat = getOrCreateChat(routeKey, cwd);
+		if (!cwdCheck.ok) {
+			// Persisted cwd is no longer valid (allowlist changed,
+			// directory deleted, etc.). Don't silently fall back to the
+			// recorded string — that would bypass the allowlist or
+			// rehydrate into a missing path. Drop the ghost entry so
+			// the client sees session.removed on the next subscribe.
+			log.warn("rehydrate.cwd_rejected", {
+				key: routeKey,
+				cwd: summary.cwd,
+				reason: cwdCheck.reason,
+			});
+			bridge.removeSession(routeKey);
+			return undefined;
+		}
+		const chat = getOrCreateChat(routeKey, cwdCheck.cwd);
 		if (summary.sessionFile) {
 			try {
 				await chat.resume(summary.sessionFile);
@@ -210,7 +223,21 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 			}
 			case "session.close": {
 				const chat = chats.get(msg.key);
-				if (chat) await chat.dispose();
+				if (chat) {
+					// Cancel any in-flight turn and drain queued sends so
+					// they don't race the dispose. abort() returns once
+					// the agent's stream stops; awaiting the tail then
+					// catches the trailing `endTurn` + post-turn patch.
+					try { await chat.abort(); } catch (err) {
+						log.warn("close.abort_failed", { key: msg.key, err: String(err) });
+					}
+					const tail = turnTails.get(msg.key);
+					if (tail) {
+						try { await tail; } catch { /* errors already logged */ }
+					}
+					await chat.dispose();
+				}
+				turnTails.delete(msg.key);
 				chats.delete(msg.key);
 				bridge.removeSession(msg.key);
 				break;
@@ -240,7 +267,7 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				}
 				const state: WsState = {
 					id: nextWsId++,
-					subs: new Map(),
+					subs: new Set(),
 					// `send` patched after upgrade
 					send: () => {},
 				};
@@ -338,7 +365,10 @@ export function isOriginAllowed(origin: string | null, host: string, port: numbe
 	let parsed: URL;
 	try { parsed = new URL(origin); } catch { return false; }
 	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-	if (Number(parsed.port || "80") !== port) return false;
+	const originPort = parsed.port
+		? Number(parsed.port)
+		: (parsed.protocol === "https:" ? 443 : 80);
+	if (originPort !== port) return false;
 	// Strip IPv6 brackets if the URL parser left them on `hostname`
 	// (Bun does; Node does not) so we can compare against the canonical
 	// host form regardless of how the browser formatted the Origin.

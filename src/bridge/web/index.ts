@@ -16,7 +16,7 @@
  *     on boot. Pure metadata — the actual session content lives in
  *     omp's jsonl.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 import type {
@@ -58,7 +58,7 @@ interface RingEntry {
 interface Subscriber {
 	send(msg: ServerMsg): void;
 	/** Set of route keys this subscriber currently cares about. */
-	subs: Map<string, number>; // routeKey -> last-seen seq
+	subs: Set<string>;
 }
 
 /** Persisted-to-disk snapshot of a web session's metadata. */
@@ -147,6 +147,12 @@ export class WebBridge implements Bridge {
 	private readonly subscribers = new Set<Subscriber>();
 	private persistTimer: ReturnType<typeof setTimeout> | undefined;
 	private readonly allowedCwdPrefixes: readonly string[];
+	/** Realpath'd `defaultCwd` for prefix matching. A user can place
+	 *  the default at e.g. `~/.omptg` which itself may be a symlink;
+	 *  we want to compare against the resolved target so `/etc/...`
+	 *  reached via a symlinked subdirectory still gets rejected. */
+	private readonly canonicalDefaultCwd: string;
+	private readonly canonicalAllowedCwdPrefixes: readonly string[];
 
 	constructor(opts: WebBridgeOptions) {
 		this.defaultCwd = opts.defaultCwd;
@@ -155,6 +161,8 @@ export class WebBridge implements Bridge {
 		this.nextId = loaded.nextId;
 		for (const s of loaded.sessions) this.sessions.set(s.key, s);
 		this.allowedCwdPrefixes = opts.allowedCwdPrefixes ?? [];
+		this.canonicalDefaultCwd = canonicalize(opts.defaultCwd);
+		this.canonicalAllowedCwdPrefixes = (opts.allowedCwdPrefixes ?? []).map(canonicalize);
 	}
 
 	systemPromptAddendum(): string {
@@ -274,10 +282,10 @@ export class WebBridge implements Bridge {
 	/** Replace a subscriber's interest set; for each newly-added key,
 	 *  send a backfill of events with seq > the supplied `since`. */
 	applySubscription(sub: Subscriber, subs: Array<{ key: string; since?: number }>): void {
-		const nextSubs = new Map<string, number>();
+		const nextSubs = new Set<string>();
 		for (const s of subs) {
 			const since = s.since ?? 0;
-			nextSubs.set(s.key, since);
+			nextSubs.add(s.key);
 			const ring = this.rings.get(s.key) ?? [];
 			const tail = ring.filter(e => e.seq > since);
 			// Always emit a backfill envelope (even with empty events)
@@ -294,9 +302,6 @@ export class WebBridge implements Bridge {
 				earliestSeq,
 				events: tail,
 			});
-			if (tail.length > 0) {
-				nextSubs.set(s.key, tail[tail.length - 1]!.seq);
-			}
 			// Bring late subscribers up to date on turn-active state
 			// — otherwise tab-switch mid-turn shows a stale idle UI.
 			const active = this.turnState.get(s.key);
@@ -395,14 +400,14 @@ export class WebBridge implements Bridge {
 	 *  (defaultCwd is always allowed). Returns the resolved absolute
 	 *  path on success, undefined on rejection. */
 	validateCwd(cwd: string | undefined): string | undefined {
-		if (!cwd || cwd === this.defaultCwd) return this.defaultCwd;
+		if (!cwd) return this.defaultCwd;
 		// Reject relative paths outright: `resolve(cwd)` would silently
 		// rebase them onto process.cwd(), which is almost never what
 		// the client meant and can punch through the prefix allowlist.
 		if (!isAbsolute(cwd)) return undefined;
-		const resolved = resolvePath(cwd);
-		if (isUnderPrefix(resolved, this.defaultCwd)) return resolved;
-		for (const p of this.allowedCwdPrefixes) {
+		const resolved = canonicalize(resolvePath(cwd));
+		if (isUnderPrefix(resolved, this.canonicalDefaultCwd)) return resolved;
+		for (const p of this.canonicalAllowedCwdPrefixes) {
 			if (resolved === p || isUnderPrefix(resolved, p)) return resolved;
 		}
 		return undefined;
@@ -450,4 +455,17 @@ function isUnderPrefix(path: string, prefix: string): boolean {
 	if (path === prefix) return true;
 	const withSep = prefix.endsWith(sep) ? prefix : prefix + sep;
 	return path.startsWith(withSep);
+}
+
+/** Best-effort realpath: resolves symlinks so a candidate path can't
+ *  smuggle in `<defaultCwd>/link -> /etc` past the allowlist. Returns
+ *  the input unchanged for paths that don't exist on disk (the
+ *  allowlist check still applies; for an open() we'd reject via
+ *  resolveCwd's `missing` reason). */
+function canonicalize(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return path;
+	}
 }

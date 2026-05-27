@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebBridge } from "../src/bridge/web/index.ts";
@@ -8,14 +8,14 @@ import type { ServerMsg } from "../src/bridge/web/protocol.ts";
 interface FakeSub {
 	send(msg: ServerMsg): void;
 	received: ServerMsg[];
-	subs: Map<string, number>;
+	subs: Set<string>;
 }
 
 function makeSub(): FakeSub {
 	const received: ServerMsg[] = [];
 	return {
 		received,
-		subs: new Map(),
+		subs: new Set(),
 		send(msg) { received.push(msg); },
 	};
 }
@@ -31,7 +31,10 @@ function makeBridge(): WebBridge {
 }
 
 beforeEach(() => {
-	tempDir = mkdtempSync(join(tmpdir(), "omptg-web-"));
+	// realpath so /var/folders → /private/var/folders on macOS;
+	// otherwise prefix-match against the canonicalized defaultCwd
+	// fails on what is in fact the same path.
+	tempDir = realpathSync(mkdtempSync(join(tmpdir(), "omptg-web-")));
 	stateFile = join(tempDir, "web-sessions.json");
 });
 
@@ -187,7 +190,7 @@ describe("WebBridge", () => {
 	});
 
 	it("validateCwd honors allowedCwdPrefixes for paths outside defaultCwd", () => {
-		const extra = mkdtempSync(join(tmpdir(), "omptg-extra-"));
+		const extra = realpathSync(mkdtempSync(join(tmpdir(), "omptg-extra-")));
 		try {
 			const b = new WebBridge({
 				defaultCwd: tempDir,
@@ -297,5 +300,15 @@ describe("WebBridge", () => {
 		expect(b.validateCwd("relative/path")).toBeUndefined();
 		expect(b.validateCwd("../escape")).toBeUndefined();
 		expect(b.validateCwd("./dot")).toBeUndefined();
+	});
+
+	it("validateCwd realpath-resolves to reject symlinks that escape the allowlist", () => {
+		// R5: <defaultCwd>/link -> /etc would otherwise prefix-match
+		// defaultCwd via its lexical path. realpath collapses it to
+		// /etc which fails the allowlist.
+		const b = makeBridge();
+		const link = join(tempDir, "escape");
+		symlinkSync("/etc", link);
+		expect(b.validateCwd(link)).toBeUndefined();
 	});
 });
