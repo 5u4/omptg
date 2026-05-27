@@ -11,15 +11,24 @@
  * affordance. Reconnect uses the protocol's `since`/`earliestSeq` for
  * gap detection.
  */
-import { h, render } from "preact";
+import { h, render, type VNode } from "preact";
 import { useEffect, useRef } from "preact/hooks";
-import { signal, computed, effect, batch } from "@preact/signals";
+import { batch, computed, effect, signal, type Signal } from "@preact/signals";
 import htm from "htm";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import ReconnectingWebSocket from "reconnecting-websocket";
 
-const html = htm.bind(h);
+import type {
+	ClientMsg,
+	ServerMsg,
+	SessionEvent,
+	SessionSummary,
+	UiRequestPayload,
+} from "../protocol.ts";
+
+// htm.bind is generic over the hyperscript fn; let TS infer the result.
+const html = htm.bind(h) as (strings: TemplateStringsArray, ...values: unknown[]) => VNode;
 
 // --- markdown -------------------------------------------------------------
 
@@ -27,57 +36,98 @@ marked.setOptions({ gfm: true, breaks: false });
 
 /** Render markdown to sanitized HTML. Sync (marked.parse), so the live
  *  bubble can re-render on every token delta without await. */
-function md(src) {
-	const raw = marked.parse(src ?? "");
+function md(src: string): string {
+	const raw = marked.parse(src ?? "", { async: false }) as string;
 	return DOMPurify.sanitize(raw);
 }
 
 // --- store ----------------------------------------------------------------
 
-/** Flat session record. `events` is an array of typed display rows,
- *  built from incoming SessionEvent envelopes. */
-function makeSession(summary) {
+/** A pending `ui.request` rendered as an inline form. Carried via the
+ *  server's ui.request envelope; cleared on ui.cancel or local resolve. */
+type PendingUi = UiRequestPayload & { reqId: string; awaitsText: boolean };
+
+/** Per-tool render state. Mutated in-place; bumpEvents() forces a
+ *  re-render of any subscribed components since the Map identity stays
+ *  the same. */
+interface ToolState {
+	toolCallId: string;
+	toolName: string;
+	line: string;
+	args: unknown;
+	result: unknown;
+	isError: boolean;
+	done: boolean;
+	expanded: boolean;
+	subagents: Map<string, string>;  // slotKey -> rendered line
+}
+
+/** Discriminated display row types — what `Stream` actually renders. */
+type Row =
+	| { kind: "user"; text: string }
+	| { kind: "assistant"; text: string }
+	| { kind: "preamble"; text: string }
+	| { kind: "notice"; text: string }
+	| { kind: "replace"; text: string }
+	| { kind: "tool"; toolCallId: string };
+
+interface Session {
+	key: string;
+	title: Signal<string>;
+	cwd: Signal<string>;
+	modelId: Signal<string>;
+	sessionFile: Signal<string>;
+	turnActive: Signal<boolean>;
+	lastActivity: Signal<number>;
+	unread: Signal<number>;
+	events: Signal<Row[]>;
+	lastSeq: number;
+	earliestSeq: number;
+	pendingUi: Signal<PendingUi | null>;
+	liveText: Signal<string>;
+	liveActive: Signal<boolean>;
+	tools: Map<string, ToolState>;
+}
+
+function makeSession(summary: Partial<SessionSummary> & { key: string }): Session {
 	return {
 		key: summary.key,
-		title: signal(summary.title || ""),
-		cwd: signal(summary.cwd || ""),
-		modelId: signal(summary.modelId || ""),
-		sessionFile: signal(summary.sessionFile || ""),
+		title: signal(summary.title ?? ""),
+		cwd: signal(summary.cwd ?? ""),
+		modelId: signal(summary.modelId ?? ""),
+		sessionFile: signal(summary.sessionFile ?? ""),
 		turnActive: signal(summary.turnActive ?? false),
 		lastActivity: signal(summary.lastActivity ?? 0),
 		unread: signal(0),
-		events: signal([]),              // ordered display rows
-		lastSeq: 0,                       // last seq we processed
-		earliestSeq: 0,                   // server-reported earliest
-		pendingUi: signal(null),          // active ui.request, if any
-		// Live-bubble buffer: streaming token deltas accumulate here.
-		// Cleared on `assistant` commit (final text replaces it).
+		events: signal<Row[]>([]),
+		lastSeq: 0,
+		earliestSeq: 0,
+		pendingUi: signal<PendingUi | null>(null),
 		liveText: signal(""),
 		liveActive: signal(false),
-		// Per-tool state: id → { line, toolName, args, isError, result, done, expanded, subagents }
 		tools: new Map(),
 	};
 }
 
-const sessions = signal([]); // array of session records, sorted by lastActivity desc
-const activeKey = signal(null);
-const connState = signal("connecting"); // "live" | "down" | "connecting"
+const sessions = signal<Session[]>([]);
+const activeKey = signal<string | null>(null);
+const connState = signal<"live" | "down" | "connecting">("connecting");
 
 const activeSession = computed(() => sessions.value.find(s => s.key === activeKey.value));
 const totalUnread = computed(() => sessions.value.reduce((sum, s) => sum + s.unread.value, 0));
 
-function findSession(key) {
+function findSession(key: string): Session | undefined {
 	return sessions.value.find(s => s.key === key);
 }
 
-function upsertSession(summary) {
+function upsertSession(summary: Partial<SessionSummary> & { key: string }): Session {
 	const existing = findSession(summary.key);
 	if (existing) {
 		batch(() => {
-			if (summary.title !== undefined) existing.title.value = summary.title || existing.title.value;
+			if (summary.title !== undefined && summary.title !== "") existing.title.value = summary.title;
 			if (summary.cwd !== undefined) existing.cwd.value = summary.cwd;
-			if (summary.modelId !== undefined) existing.modelId.value = summary.modelId || "";
-			if (summary.sessionFile !== undefined) existing.sessionFile.value = summary.sessionFile || "";
+			if (summary.modelId !== undefined) existing.modelId.value = summary.modelId;
+			if (summary.sessionFile !== undefined) existing.sessionFile.value = summary.sessionFile;
 			if (summary.turnActive !== undefined) existing.turnActive.value = summary.turnActive;
 			if (summary.lastActivity !== undefined) existing.lastActivity.value = summary.lastActivity;
 		});
@@ -89,23 +139,21 @@ function upsertSession(summary) {
 	return s;
 }
 
-function removeSession(key) {
+function removeSession(key: string): void {
 	sessions.value = sessions.value.filter(s => s.key !== key);
 	if (activeKey.value === key) activeKey.value = sessions.value[0]?.key ?? null;
 }
 
-function resortSessions() {
+function resortSessions(): void {
 	sessions.value = [...sessions.value].sort((a, b) => b.lastActivity.value - a.lastActivity.value);
 }
 
 // --- event → display row reducer -----------------------------------------
 
 /** Apply a SessionEvent to a session. Mutates the session's signals. */
-function applyEvent(session, seq, ev) {
+function applyEvent(session: Session, seq: number, ev: SessionEvent): void {
 	session.lastSeq = Math.max(session.lastSeq, seq);
-	// Always bump activity so list ordering follows real motion.
 	session.lastActivity.value = Date.now();
-	// Bump unread for the inactive sessions only.
 	if (activeKey.value !== session.key) {
 		session.unread.value = session.unread.value + 1;
 	}
@@ -117,8 +165,6 @@ function applyEvent(session, seq, ev) {
 			break;
 
 		case "assistant":
-			// Commit: flush the live bubble to a finalized assistant row,
-			// then clear the live text so the next message can start fresh.
 			pushRow(session, { kind: "assistant", text: ev.text });
 			session.liveText.value = "";
 			session.liveActive.value = false;
@@ -138,7 +184,7 @@ function applyEvent(session, seq, ev) {
 				isError: false,
 				done: false,
 				expanded: false,
-				subagents: new Map(),  // slotKey -> line
+				subagents: new Map(),
 			});
 			pushRow(session, { kind: "tool", toolCallId: ev.toolCallId });
 			break;
@@ -157,7 +203,6 @@ function applyEvent(session, seq, ev) {
 
 		case "subagent_line": {
 			// Subagent rows always belong to the most recent active task.
-			// We thread them onto whichever tool entry is still running.
 			const lastTask = [...session.tools.values()].reverse().find(t => !t.done && t.toolName === "task");
 			if (lastTask) {
 				lastTask.subagents.set(ev.slotKey, ev.line);
@@ -186,9 +231,6 @@ function applyEvent(session, seq, ev) {
 			break;
 
 		case "finalize":
-			// Live bubble seal: if there's accumulated text that never
-			// got a matching `assistant` envelope (shouldn't happen but
-			// belt + suspenders), commit it now.
 			if (session.liveText.value) {
 				pushRow(session, { kind: "assistant", text: session.liveText.value });
 				session.liveText.value = "";
@@ -198,14 +240,14 @@ function applyEvent(session, seq, ev) {
 	}
 }
 
-function pushRow(session, row) {
+function pushRow(session: Session, row: Row): void {
 	session.events.value = [...session.events.value, row];
 }
 
 /** Force a re-read of `events` for components that depend on it without
- *  pushing a new row (e.g. tool result arriving updates the existing
- *  tool card's state but doesn't add a row). */
-function bumpEvents(session) {
+ *  pushing a new row (e.g. tool result update mutates the existing card
+ *  in place via its Map entry). */
+function bumpEvents(session: Session): void {
 	session.events.value = [...session.events.value];
 }
 
@@ -219,35 +261,33 @@ const ws = new ReconnectingWebSocket(
 
 ws.addEventListener("open", () => {
 	connState.value = "live";
-	// On (re)open the server sends session.list; subscriptions get
-	// re-issued in the session.list handler so backfill flows.
+	// session.list will arrive shortly; subscribe inside that handler so
+	// per-session `since` is set to lastSeq (drives backfill correctly).
 });
 ws.addEventListener("close", () => { connState.value = "down"; });
 ws.addEventListener("error", () => { connState.value = "down"; });
 
-ws.addEventListener("message", e => {
-	let msg;
-	try { msg = JSON.parse(e.data); } catch { return; }
+ws.addEventListener("message", (e: MessageEvent<string>) => {
+	let msg: ServerMsg;
+	try { msg = JSON.parse(e.data) as ServerMsg; }
+	catch { return; }
 	handleServer(msg);
 });
 
-function send(msg) { ws.send(JSON.stringify(msg)); }
+function send(msg: ClientMsg): void { ws.send(JSON.stringify(msg)); }
 
-function handleServer(msg) {
+function handleServer(msg: ServerMsg): void {
 	switch (msg.type) {
 		case "session.list":
 			batch(() => {
-				const incoming = new Map(msg.sessions.map(s => [s.key, s]));
-				// Reuse existing records (preserve unread / events) when
-				// the key still exists; drop any not in the list.
-				const next = [];
+				const next: Session[] = [];
 				for (const summary of msg.sessions) {
 					const existing = findSession(summary.key);
 					if (existing) {
-						existing.title.value = summary.title || existing.title.value;
+						if (summary.title) existing.title.value = summary.title;
 						existing.cwd.value = summary.cwd;
-						existing.modelId.value = summary.modelId || "";
-						existing.sessionFile.value = summary.sessionFile || "";
+						existing.modelId.value = summary.modelId ?? "";
+						existing.sessionFile.value = summary.sessionFile ?? "";
 						existing.turnActive.value = summary.turnActive;
 						existing.lastActivity.value = summary.lastActivity;
 						next.push(existing);
@@ -256,9 +296,8 @@ function handleServer(msg) {
 					}
 				}
 				sessions.value = next.sort((a, b) => b.lastActivity.value - a.lastActivity.value);
-				if (!activeKey.value && next.length > 0) activeKey.value = next[0].key;
+				if (!activeKey.value && next.length > 0) activeKey.value = next[0]!.key;
 			});
-			// Re-subscribe to whatever the active tab cares about.
 			resubscribe();
 			break;
 
@@ -285,9 +324,9 @@ function handleServer(msg) {
 		case "session.backfill": {
 			const s = findSession(msg.key);
 			if (!s) break;
+			s.earliestSeq = msg.earliestSeq;
 			// Detect a ring-overflow gap: server's earliestSeq is greater
 			// than the first seq we'd need to be contiguous with.
-			s.earliestSeq = msg.earliestSeq;
 			if (msg.from > 0 && msg.earliestSeq > msg.from + 1) {
 				pushRow(s, {
 					kind: "notice",
@@ -322,41 +361,44 @@ function handleServer(msg) {
 	}
 }
 
-function resubscribe() {
+function resubscribe(): void {
 	const subs = sessions.value.map(s => ({ key: s.key, since: s.lastSeq }));
 	if (subs.length > 0) send({ type: "session.subscribe", subs });
 }
 
 // --- session ops ---------------------------------------------------------
 
-function openNewSession() { send({ type: "session.open" }); }
-function sendPrompt(key, text) {
+function openNewSession(): void { send({ type: "session.open" }); }
+
+function sendPrompt(key: string, text: string): void {
 	const trimmed = text.trim();
 	if (!trimmed) return;
 	send({ type: "session.send", key, text: trimmed });
-	// Optimistically render the user's message; the server doesn't echo it.
+	// Optimistically render the user's bubble; server doesn't echo it.
 	const s = findSession(key);
 	if (s) pushRow(s, { kind: "user", text: trimmed });
 }
-function abortTurn(key) { send({ type: "session.abort", key }); }
-function closeSession(key) {
+
+function abortTurn(key: string): void { send({ type: "session.abort", key }); }
+
+function closeSession(key: string): void {
 	if (!confirm("Close this session? (omp keeps the jsonl on disk.)")) return;
 	send({ type: "session.close", key });
 }
-function respondUi(key, reqId, value) {
+
+function respondUi(key: string, reqId: string, value: unknown): void {
 	send({ type: "ui.response", key, reqId, value });
 	const s = findSession(key);
 	if (s) s.pendingUi.value = null;
 }
 
-// Clear unread + switch active session.
-function selectSession(key) {
+function selectSession(key: string): void {
 	activeKey.value = key;
 	const s = findSession(key);
 	if (s) s.unread.value = 0;
 }
 
-// --- window title -------------------------------------------------------
+// --- window title --------------------------------------------------------
 
 effect(() => {
 	const n = totalUnread.value;
@@ -365,9 +407,9 @@ effect(() => {
 	document.title = (n > 0 ? `(${n}) ` : "") + base;
 });
 
-// --- components ---------------------------------------------------------
+// --- components ----------------------------------------------------------
 
-function Rail() {
+function Rail(): VNode {
 	return html`
 		<div class="rail">
 			<div class="rail-header">
@@ -386,7 +428,7 @@ function Rail() {
 	`;
 }
 
-function SessionItem({ session }) {
+function SessionItem({ session }: { session: Session }): VNode {
 	const active = activeKey.value === session.key;
 	const unread = session.unread.value;
 	const turn = session.turnActive.value;
@@ -404,7 +446,7 @@ function SessionItem({ session }) {
 	`;
 }
 
-function Pane() {
+function Pane(): VNode {
 	const session = activeSession.value;
 	if (!session) {
 		return html`<div class="pane"><div class="empty">
@@ -421,7 +463,7 @@ function Pane() {
 	`;
 }
 
-function PaneHeader({ session }) {
+function PaneHeader({ session }: { session: Session }): VNode {
 	return html`
 		<div class="pane-header">
 			<div>
@@ -436,20 +478,14 @@ function PaneHeader({ session }) {
 	`;
 }
 
-function Stream({ session }) {
-	const ref = useRef(null);
+function Stream({ session }: { session: Session }): VNode {
+	const ref = useRef<HTMLDivElement>(null);
 	const stickRef = useRef(true);
-	const hasUnreadBelow = useRef(false);
 
-	// Auto-scroll: stick to bottom unless the user scrolled up. We only
-	// scroll on the events-changed tick (not every signal write) to avoid
-	// thrashing on every token delta — `liveText` updates produce a single
-	// reflow per delta via the bubble's innerHTML update, and we
-	// scroll-to-bottom after by reading scroll geometry post-render.
 	useEffect(() => {
 		const el = ref.current;
 		if (!el) return;
-		const onScroll = () => {
+		const onScroll = (): void => {
 			const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 32;
 			stickRef.current = atBottom;
 		};
@@ -457,9 +493,8 @@ function Stream({ session }) {
 		return () => el.removeEventListener("scroll", onScroll);
 	}, []);
 
-	// Effect re-runs whenever events/liveText change (signal access).
+	// Re-runs whenever events/liveText change (signal access).
 	useEffect(() => {
-		// Touch the signals so this effect subscribes to them.
 		void session.events.value;
 		void session.liveText.value;
 		const el = ref.current;
@@ -478,7 +513,7 @@ function Stream({ session }) {
 			${rows.length === 0 && !live && !liveActive
 				? html`<div class="empty">No messages yet. Say something.</div>`
 				: null}
-			${rows.map((row, i) => html`<${Row} key=${i} row=${row} session=${session} />`)}
+			${rows.map((row, i) => html`<${RowView} key=${i} row=${row} session=${session} />`)}
 			${liveActive || live
 				? html`<div class="msg-assistant streaming" dangerouslySetInnerHTML=${{ __html: md(live || " ") }}></div>`
 				: null}
@@ -487,7 +522,7 @@ function Stream({ session }) {
 	`;
 }
 
-function Row({ row, session }) {
+function RowView({ row, session }: { row: Row; session: Session }): VNode | null {
 	switch (row.kind) {
 		case "user":
 			return html`<div class="msg-user">${row.text}</div>`;
@@ -501,23 +536,22 @@ function Row({ row, session }) {
 			return html`<div class="notice replace">${row.text}</div>`;
 		case "tool":
 			return html`<${ToolCard} toolCallId=${row.toolCallId} session=${session} />`;
-		default:
-			return null;
 	}
 }
 
-function ToolCard({ toolCallId, session }) {
-	// Read events.value so we re-render when bumpEvents fires.
+function ToolCard({ toolCallId, session }: { toolCallId: string; session: Session }): VNode | null {
+	// Subscribe to events.value so bumpEvents triggers re-render.
 	void session.events.value;
 	const t = session.tools.get(toolCallId);
 	if (!t) return null;
 	const status = !t.done ? "running" : t.isError ? "error" : "ok";
-	const icon = !t.done ? html`<span class="spinner"></span>` : t.isError ? "❌" : "✓";
-	const toggle = () => { t.expanded = !t.expanded; bumpEvents(session); };
+	const toggle = (): void => { t.expanded = !t.expanded; bumpEvents(session); };
 	return html`
 		<div class="tool ${status}">
 			<div class="tool-header ${t.expanded ? "open" : ""}" onClick=${toggle}>
-				${typeof icon === "string" ? html`<span class="icon">${icon}</span>` : icon}
+				${!t.done
+					? html`<span class="spinner"></span>`
+					: html`<span class="icon">${t.isError ? "❌" : "✓"}</span>`}
 				<div class="label">${t.line}</div>
 				<span class="chevron">▶</span>
 			</div>
@@ -542,13 +576,13 @@ function ToolCard({ toolCallId, session }) {
 	`;
 }
 
-function fmt(v) {
+function fmt(v: unknown): string {
 	if (typeof v === "string") return v;
 	try { return JSON.stringify(v, null, 2); } catch { return String(v); }
 }
 
-function UiForm({ session, req }) {
-	const respond = value => respondUi(session.key, req.reqId, value);
+function UiForm({ session, req }: { session: Session; req: PendingUi }): VNode | null {
+	const respond = (value: unknown): void => respondUi(session.key, req.reqId, value);
 	switch (req.kind) {
 		case "select":
 			return html`
@@ -574,23 +608,25 @@ function UiForm({ session, req }) {
 		case "input":
 		case "editor":
 			return html`<${InputForm} req=${req} respond=${respond} />`;
-		default:
-			return null;
 	}
 }
 
-function InputForm({ req, respond }) {
-	const ref = useRef(null);
+function InputForm({ req, respond }: {
+	req: PendingUi & { kind: "input" | "editor" };
+	respond: (value: unknown) => void;
+}): VNode {
+	const ref = useRef<HTMLTextAreaElement>(null);
 	useEffect(() => { ref.current?.focus(); }, []);
-	const submit = () => {
-		const v = ref.current?.value ?? "";
-		respond(v);
+	const submit = (): void => {
+		respond(ref.current?.value ?? "");
 	};
+	const placeholder = req.kind === "input" ? req.placeholder : undefined;
+	const prefill = req.kind === "editor" ? req.prefill : undefined;
 	return html`
 		<div class="ui-form">
-			<div class="title">❓ ${req.title}${req.placeholder ? ` (${req.placeholder})` : ""}</div>
-			<textarea ref=${ref} defaultValue=${req.prefill ?? ""}
-				onKeyDown=${e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); }}
+			<div class="title">❓ ${req.title}${placeholder ? ` (${placeholder})` : ""}</div>
+			<textarea ref=${ref} defaultValue=${prefill ?? ""}
+				onKeyDown=${(e: KeyboardEvent) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); }}
 			></textarea>
 			<div class="row">
 				<button onClick=${submit}>submit (⌘↵)</button>
@@ -600,25 +636,26 @@ function InputForm({ req, respond }) {
 	`;
 }
 
-function Composer({ session }) {
-	const ref = useRef(null);
-	const submit = () => {
+function Composer({ session }: { session: Session }): VNode {
+	const ref = useRef<HTMLTextAreaElement>(null);
+	const submit = (): void => {
 		const v = ref.current?.value ?? "";
 		if (!v.trim()) return;
 		sendPrompt(session.key, v);
-		ref.current.value = "";
-		// Reset textarea height after clearing.
-		if (ref.current) ref.current.style.height = "auto";
+		if (ref.current) {
+			ref.current.value = "";
+			ref.current.style.height = "auto";
+		}
 	};
-	const onKeyDown = e => {
+	const onKeyDown = (e: KeyboardEvent): void => {
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
 			submit();
 		}
 	};
-	const onInput = e => {
+	const onInput = (e: Event): void => {
 		// Auto-grow up to 200px.
-		const ta = e.currentTarget;
+		const ta = e.currentTarget as HTMLTextAreaElement;
 		ta.style.height = "auto";
 		ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
 	};
@@ -632,7 +669,7 @@ function Composer({ session }) {
 	`;
 }
 
-function App() {
+function App(): VNode {
 	return html`
 		<div class="shell">
 			<${Rail} />
@@ -641,4 +678,6 @@ function App() {
 	`;
 }
 
-render(html`<${App} />`, document.getElementById("app"));
+const root = document.getElementById("app");
+if (!root) throw new Error("missing #app");
+render(html`<${App} />`, root);

@@ -1,15 +1,14 @@
 {
   "compilerOptions": {
-    // Environment setup & latest features
-    "lib": ["ESNext"],
+    // Environment: browser, DOM types, no Bun globals.
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "target": "ESNext",
-    "module": "Preserve",
+    "module": "ESNext",
     "moduleDetection": "force",
     "jsx": "react-jsx",
-    "allowJs": true,
-    "types": ["bun"],
+    "jsxImportSource": "preact",
 
-    // Bundler mode
+    // Bundler mode (esbuild handles the actual emit).
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
@@ -22,10 +21,8 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
 
-    // Some stricter flags (disabled by default)
     "noUnusedLocals": false,
-    "noUnusedParameters": false,
-    "noPropertyAccessFromIndexSignature": false
+    "noUnusedParameters": false
   },
-  "exclude": ["src/bridge/web/frontend", "node_modules"]
+  "include": ["src/bridge/web/frontend/**/*", "src/bridge/web/protocol.ts"]
 }
