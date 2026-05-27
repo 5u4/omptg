@@ -1,0 +1,156 @@
+@import "tailwindcss";
+
+/* shadcn-svelte design tokens (slate / neutral). Dark mode is the
+ * default (the <html> tag carries `class="dark"`); light values are
+ * here for completeness in case a theme toggle is added later. */
+
+@layer base {
+	:root {
+		--background: oklch(1 0 0);
+		--foreground: oklch(0.145 0 0);
+		--card: oklch(1 0 0);
+		--card-foreground: oklch(0.145 0 0);
+		--popover: oklch(1 0 0);
+		--popover-foreground: oklch(0.145 0 0);
+		--primary: oklch(0.205 0 0);
+		--primary-foreground: oklch(0.985 0 0);
+		--secondary: oklch(0.97 0 0);
+		--secondary-foreground: oklch(0.205 0 0);
+		--muted: oklch(0.97 0 0);
+		--muted-foreground: oklch(0.556 0 0);
+		--accent: oklch(0.97 0 0);
+		--accent-foreground: oklch(0.205 0 0);
+		--destructive: oklch(0.577 0.245 27.325);
+		--destructive-foreground: oklch(0.985 0 0);
+		--border: oklch(0.922 0 0);
+		--input: oklch(0.922 0 0);
+		--ring: oklch(0.708 0 0);
+		--radius: 0.625rem;
+	}
+
+	.dark {
+		--background: oklch(0.145 0 0);
+		--foreground: oklch(0.985 0 0);
+		--card: oklch(0.205 0 0);
+		--card-foreground: oklch(0.985 0 0);
+		--popover: oklch(0.205 0 0);
+		--popover-foreground: oklch(0.985 0 0);
+		--primary: oklch(0.922 0 0);
+		--primary-foreground: oklch(0.205 0 0);
+		--secondary: oklch(0.269 0 0);
+		--secondary-foreground: oklch(0.985 0 0);
+		--muted: oklch(0.269 0 0);
+		--muted-foreground: oklch(0.708 0 0);
+		--accent: oklch(0.269 0 0);
+		--accent-foreground: oklch(0.985 0 0);
+		--destructive: oklch(0.704 0.191 22.216);
+		--destructive-foreground: oklch(0.985 0 0);
+		--border: oklch(1 0 0 / 10%);
+		--input: oklch(1 0 0 / 15%);
+		--ring: oklch(0.556 0 0);
+	}
+}
+
+@theme inline {
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-destructive-foreground: var(--destructive-foreground);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+	--radius-sm: calc(var(--radius) - 4px);
+	--radius-md: calc(var(--radius) - 2px);
+	--radius-lg: var(--radius);
+	--radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+	* { border-color: var(--border); }
+	body { background: var(--background); color: var(--foreground); }
+}
+
+/* --- chat-specific styles that aren't worth dragging shadcn in for -- */
+
+@layer components {
+	.msg-assistant > :first-child { margin-top: 0; }
+	.msg-assistant > :last-child { margin-bottom: 0; }
+	.msg-assistant p { margin: 0 0 0.5em; }
+	.msg-assistant h1, .msg-assistant h2, .msg-assistant h3 { margin: 1em 0 0.5em; line-height: 1.3; font-weight: 600; }
+	.msg-assistant h1 { font-size: 1.4em; }
+	.msg-assistant h2 { font-size: 1.2em; }
+	.msg-assistant h3 { font-size: 1.05em; }
+	.msg-assistant ul, .msg-assistant ol { margin: 0 0 0.5em; padding-left: 1.5em; }
+	.msg-assistant li { margin: 0.1em 0; }
+	.msg-assistant code:not(pre code) {
+		background: var(--muted);
+		padding: 0.1em 0.4em;
+		border-radius: 0.25rem;
+		font-size: 0.9em;
+	}
+	.msg-assistant pre {
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: 0.5rem;
+		padding: 0.75em 1em;
+		overflow-x: auto;
+		margin: 0 0 0.5em;
+	}
+	.msg-assistant pre code {
+		background: transparent;
+		padding: 0;
+		font-size: 0.9em;
+	}
+	.msg-assistant blockquote {
+		border-left: 3px solid var(--border);
+		padding: 0 1em;
+		color: var(--muted-foreground);
+		margin: 0 0 0.5em;
+	}
+	.msg-assistant table {
+		border-collapse: collapse;
+		margin: 0 0 0.5em;
+		display: block;
+		overflow-x: auto;
+	}
+	.msg-assistant th, .msg-assistant td {
+		border: 1px solid var(--border);
+		padding: 0.4em 0.75em;
+	}
+	.msg-assistant th { background: var(--muted); }
+}
+
+/* Streaming cursor */
+@keyframes blink { 50% { opacity: 0; } }
+.streaming-cursor::after {
+	content: "▍";
+	color: var(--ring);
+	margin-left: 1px;
+	animation: blink 1s steps(2) infinite;
+}
+
+/* Turn-active pulse on rail item */
+@keyframes pulse-ring {
+	0%   { box-shadow: 0 0 0 0 oklch(0.704 0.16 145 / 0.6); }
+	70%  { box-shadow: 0 0 0 6px oklch(0.704 0.16 145 / 0); }
+	100% { box-shadow: 0 0 0 0 oklch(0.704 0.16 145 / 0); }
+}
+.turn-pulse {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: oklch(0.704 0.16 145);
+	animation: pulse-ring 1.2s ease-out infinite;
+}

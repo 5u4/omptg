@@ -4,11 +4,11 @@
   "type": "module",
   "scripts": {
     "start": "bun run src/main.ts",
-    "start:web": "bun run scripts/build-web.ts && bun run src/web-main.ts",
-    "build:web": "bun run scripts/build-web.ts",
-    "watch:web": "bun run scripts/build-web.ts --watch",
+    "start:web": "bun run build:web && bun run src/web-main.ts",
+    "build:web": "cd src/bridge/web/frontend && vite build",
+    "dev:web": "cd src/bridge/web/frontend && vite",
     "smoke": "bun run scripts/smoke.ts",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "tsc --noEmit && cd src/bridge/web/frontend && svelte-check --tsconfig ./tsconfig.json",
     "pm2:start": "pm2 start ecosystem.config.cjs",
     "pm2:restart": "pm2 restart omptg --update-env",
     "pm2:stop": "pm2 stop omptg",
@@ -17,21 +17,29 @@
     "test": "bun test test/"
   },
   "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tailwindcss/vite": "^4.3.0",
     "@types/bun": "latest",
     "@types/dompurify": "^3.2.0",
-    "esbuild": "^0.28.0",
-    "typescript": "^6.0.3"
+    "svelte-check": "^4.4.8",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.14"
   },
   "dependencies": {
     "@grammyjs/auto-retry": "^2.0.2",
+    "@lucide/svelte": "^1.16.0",
     "@oh-my-pi/pi-coding-agent": "^15.4.3",
-    "@preact/signals": "^2.9.1",
+    "bits-ui": "^2.18.1",
+    "clsx": "^2.1.1",
     "dompurify": "^3.4.7",
     "grammy": "^1.43.0",
-    "htm": "^3.1.1",
     "marked": "^18.0.4",
-    "preact": "^10.29.2",
+    "mode-watcher": "^1.1.0",
     "reconnecting-websocket": "^4.4.0",
+    "svelte": "^5.55.9",
+    "tailwind-merge": "^3.6.0",
+    "tailwind-variants": "^3.2.2",
     "telegramify-markdown": "^1.3.3"
   }
 }
