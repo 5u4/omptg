@@ -321,6 +321,14 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				break;
 			}
 			case "folder.create": {
+				// Protocol declares `cwd: string`, but a malformed wire
+				// payload (missing/empty) would slip through resolveCwd
+				// → silently bind the new folder to defaultCwd. Reject
+				// up front so the user sees a clear error.
+				if (typeof msg.cwd !== "string" || !msg.cwd) {
+					state.send({ type: "error", message: "folder.create: cwd is required" });
+					return;
+				}
 				const r = bridge.resolveCwd(msg.cwd);
 				if (!r.ok) {
 					state.send({ type: "error", message: `cwd ${r.reason}: ${msg.cwd}` });
@@ -333,6 +341,10 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				break;
 			}
 			case "folder.rename": {
+				if (typeof msg.id !== "string" || !msg.id) {
+					state.send({ type: "error", message: "folder.rename: id is required" });
+					return;
+				}
 				const res = bridge.renameFolder(msg.id, msg.name);
 				if (!res.ok) {
 					state.send({ type: "error", message: `folder rename: ${res.reason}` });

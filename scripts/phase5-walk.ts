@@ -7,7 +7,7 @@
 import { WebBridge } from "../src/bridge/web/index.ts";
 import { startWebServer } from "../src/bridge/web/server.ts";
 import type { ServerMsg, FolderSummary, SessionSummary } from "../src/bridge/web/protocol.ts";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,12 +23,16 @@ async function connect(port: number): Promise<{
 }> {
 	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
 	const messages: ServerMsg[] = [];
+	// Attach the message listener before awaiting `open` so we can't
+	// miss a handshake envelope (WebSocket spec dispatches `open`
+	// before any `message`, but the explicit ordering reads cleaner
+	// and silences a stylistic review nit).
+	ws.addEventListener("message", e => {
+		messages.push(JSON.parse(String(e.data)) as ServerMsg);
+	});
 	await new Promise<void>((resolve, reject) => {
 		ws.addEventListener("open", () => resolve(), { once: true });
 		ws.addEventListener("error", () => reject(new Error("ws error")), { once: true });
-	});
-	ws.addEventListener("message", e => {
-		messages.push(JSON.parse(String(e.data)) as ServerMsg);
 	});
 	const waitFor = (pred: (m: ServerMsg) => boolean, timeoutMs = 1500): Promise<ServerMsg> =>
 		new Promise((resolve, reject) => {
@@ -44,7 +48,14 @@ async function connect(port: number): Promise<{
 	return { ws, messages, waitFor };
 }
 
-const tempDir = mkdtempSync(join(tmpdir(), "omptg-phase5-"));
+const tempDirs: string[] = [];
+function mkTempDir(label: string): string {
+	const d = mkdtempSync(join(tmpdir(), label));
+	tempDirs.push(d);
+	return d;
+}
+
+const tempDir = mkTempDir("omptg-phase5-");
 const stateFile = join(tempDir, "web-sessions.json");
 
 // --- Round 1: fresh bridge, create folder, open session in folder. ----
@@ -144,7 +155,7 @@ console.log("round 2: restart, expect persisted folder + sessions");
 // --- Round 3: v1 state file migrates cleanly. --------------------------
 console.log("round 3: v1 → v2 migration");
 {
-	const v1Dir = mkdtempSync(join(tmpdir(), "omptg-phase5-v1-"));
+	const v1Dir = mkTempDir("omptg-phase5-v1-");
 	const v1File = join(v1Dir, "web-sessions.json");
 	writeFileSync(v1File, JSON.stringify({
 		version: 1,
@@ -173,6 +184,14 @@ console.log("round 3: v1 → v2 migration");
 	await bridge.dispose();
 }
 
+
+// Always cleanup temp dirs — including on uncaught exceptions, so
+// repeated runs don't pile up state in /tmp.
+process.on("exit", () => {
+	for (const d of tempDirs) {
+		try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
+	}
+});
 if (process.exitCode) {
 	console.error("phase 5 walk: FAILURES present");
 	process.exit(process.exitCode);

@@ -48,6 +48,7 @@ function onKeydown(e: KeyboardEvent): void {
 				bind:value={name}
 				maxlength={80}
 				autofocus
+				aria-label="Folder name"
 				class="rounded-md border border-input bg-background px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
 			/>
 			<div class="mt-1 flex justify-end gap-2">
