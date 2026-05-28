@@ -83,7 +83,7 @@ function neutralizeHorizontalRules(src: string): string {
 	// reserved), so rewriting would silently mangle legitimate code
 	// snippets that happen to contain HR-shaped lines. Matches the
 	// fence-aware pattern used by normalizeHeadings and
-	// neutralizeDoubleBackticks.
+	// neutralizeCodeSpans.
 	const lines = src.split("\n");
 	let inFence = false;
 	const HR = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/;
@@ -101,25 +101,41 @@ function neutralizeHorizontalRules(src: string): string {
 
 
 /**
- * GFM uses `` ``…`` `` (double-backtick spans) when the inline content
- * contains a literal backtick that single-backtick code can't hold.
- * `telegramify-markdown` preserves them verbatim under `keep` mode, but
- * Telegram MarkdownV2 has no double-backtick token — its parser reads
- * each `` ` `` independently, treating adjacent `` `` `` as two empty
- * code entities. Any reserved char (`-`, `.`, `(`, `!`, …) caught
- * between two such empty entities is then "outside code" and trips
- * `Bad Request: can't parse entities: Character '…' is reserved`.
+ * Flatten any CommonMark code span whose opening backtick-run length
+ * is ≥2 into a single-backtick span, and sanitize EVERY resulting
+ * single-backtick span so its content cannot break Telegram MarkdownV2
+ * entity parsing.
  *
- * Fix: flatten every `` `` x `y` z `` `` to a single inline-code span
- * by stripping inner backticks (`` `x y z` ``). The inner emphasis is
- * lost but the message renders instead of fallback-to-plain.
+ * Why flatten:
+ *   GFM uses `` `` … `` `` (or longer runs) when the content contains
+ *   a literal backtick. `telegramify-markdown` preserves them verbatim
+ *   under `keep`, but MarkdownV2 has no multi-backtick token — its
+ *   parser reads each `` ` `` independently, treating adjacent
+ *   `` `` `` as two empty code entities. Any reserved char caught
+ *   between them is then "outside code" and trips `Bad Request:
+ *   can't parse entities`.
  *
- * Skipped inside triple-backtick fenced blocks so legitimate code stays
- * untouched. The fence tracker matches `splitMarkdownForTelegram`'s.
+ * Why sanitize span content:
+ *   MarkdownV2 inline code only honors `\` as an escape for the
+ *   closing backtick. So content of `` `\` `` reaches Telegram as
+ *   "` \ `" where the backslash escapes the closing backtick → span
+ *   never closes → entity offsets shift → 400. Same hazard if span
+ *   content ENDS in `\`. We replace `\` with U+FF3C (`＼`, fullwidth
+ *   reverse solidus), which is visually equivalent and parser-inert.
+ *   Empty or whitespace-only spans are dropped (the surrounding text
+ *   is preserved) because adjacent backticks `` `` `` recreate the
+ *   exact failure mode this pass exists to prevent.
+ *
+ * Skipped inside triple-backtick FENCED blocks so legitimate code
+ * stays untouched. Fence tracker matches `splitMarkdownForTelegram`.
  */
-function neutralizeDoubleBackticks(src: string): string {
+function neutralizeCodeSpans(src: string): string {
 	const lines = src.split("\n");
 	let inFence = false;
+	// Match a code span: a run of N backticks, then minimal content,
+	// then a run of the same length N (CommonMark rule). Non-greedy
+	// inner so we don't swallow across spans on the same line.
+	const SPAN_RE = /(`+)([\s\S]+?)\1/g;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i]!;
 		if (FENCE_RE.test(line)) {
@@ -127,25 +143,15 @@ function neutralizeDoubleBackticks(src: string): string {
 			continue;
 		}
 		if (inFence) continue;
-		// Match a double-backtick span: `` <content> `` with content that
-		// MAY contain single backticks. Non-greedy so we don't swallow
-		// across multiple spans on the same line.
-		lines[i] = line.replace(/``([\s\S]+?)``/g, (_, inner: string) => {
-			// Drop only inner backticks. Preserve whitespace as-is so
-			// alignment/indentation inside the code span is not silently
-			// rewritten. The CommonMark code-span edge-space rule says a
-			// single padding space adjacent to a delimiter is consumed
-			// when both edges have one — handle that minimal case here so
-			// `` ` x ` `` doesn't render as `[space]x[space]`, but stay
-			// out of the way for anything richer.
-			let flat = inner.replace(/`/g, "");
-			// CommonMark edge-space rule: strip one leading + one trailing
-			// space when both edges have one, ONLY if at least one
-			// non-space char remains in between. Without the non-space
-			// guard, `` `` `` (two spaces) collapses to "" → ` ` (empty
-			// code), which telegram parses as another adjacent-backtick
-			// hazard — the exact failure mode this neutralizer exists to
-			// prevent.
+		lines[i] = line.replace(SPAN_RE, (_, ticks: string, inner: string) => {
+			let flat = inner;
+			// If the opening run was ≥2 ticks, the content may itself
+			// contain single backticks (that's why GFM chose a longer
+			// run). Strip them — emphasis lost, message survives.
+			if (ticks.length >= 2) flat = flat.replace(/`/g, "");
+			// CommonMark edge-space rule: strip one leading + one
+			// trailing space when both edges have one AND a non-space
+			// remains. Without the guard, `` `` `` collapses to empty.
 			if (
 				flat.length >= 2
 				&& flat.startsWith(" ")
@@ -154,6 +160,13 @@ function neutralizeDoubleBackticks(src: string): string {
 			) {
 				flat = flat.slice(1, -1);
 			}
+			// Neutralize backslashes: MarkdownV2 inline code only
+			// escapes the closing backtick. A lone `\` or trailing
+			// `\` would eat the closer.
+			flat = flat.replace(/\\/g, "\uFF3C");
+			// Drop empty / whitespace-only spans entirely — they
+			// reintroduce adjacent-backtick hazards.
+			if (!/\S/.test(flat)) return flat;
 			return "`" + flat + "`";
 		});
 	}
@@ -233,14 +246,16 @@ export function splitMarkdownForTelegram(
 	//      pass after this one treats their cells as code and leaves them
 	//      alone. MUST run before passes that mutate line text inside
 	//      what would otherwise be table cells.
-	//   3. neutralizeDoubleBackticks: flatten GFM `` ``…`` `` spans that
-	//      Telegram MarkdownV2 can't parse. Runs after fenceTables so
-	//      double-backticks inside a now-fenced table cell stay literal.
+	//   3. neutralizeCodeSpans: flatten GFM multi-backtick spans that
+	//      Telegram MarkdownV2 can't parse and sanitize span content
+	//      (drop empty/whitespace spans, neutralize `\`). Runs after
+	//      fenceTables so spans inside a now-fenced table cell stay
+	//      literal.
 	//   4. neutralizeHorizontalRules: kill bare `---`/`***`/`___` HR
 	//      lines that Telegram rejects as unescaped reserved chars.
 	const normalized = normalizeHeadings(text);
 	const fenced = fenceTables(normalized);
-	const flattened = neutralizeDoubleBackticks(fenced);
+	const flattened = neutralizeCodeSpans(fenced);
 	const noHr = neutralizeHorizontalRules(flattened);
 	const lines = noHr.split("\n");
 	const out: MarkdownChunk[] = [];
