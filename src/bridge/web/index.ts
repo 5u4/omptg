@@ -16,7 +16,7 @@
  *     on boot. Pure metadata — the actual session content lives in
  *     omp's jsonl.
  */
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, type Stats, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import type {
@@ -479,7 +479,7 @@ export class WebBridge implements Bridge {
 	resolveCwd(cwd: string | undefined): { ok: true; cwd: string } | { ok: false; reason: "denied" | "missing" | "not-a-directory" } {
 		const allowed = this.validateCwd(cwd);
 		if (!allowed) return { ok: false, reason: "denied" };
-		let st;
+		let st: Stats;
 		try {
 			st = statSync(allowed);
 		} catch (err) {

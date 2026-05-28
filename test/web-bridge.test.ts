@@ -249,9 +249,10 @@ describe("WebBridge", () => {
 	});
 
 	it("resolveCwd maps EACCES/EPERM to denied", () => {
-		// statSync on a 0o000 directory raises EACCES for non-root.
-		// Skip when running as root (CI containers sometimes do) since
-		// the chmod no-ops there and the test would spuriously fail.
+		// statSync on a 0o000 directory raises EACCES for non-root on
+		// POSIX. Skip on Windows (chmod is largely a no-op there) and
+		// under root (chmod no-ops, the test would spuriously fail).
+		if (process.platform === "win32") return;
 		if (process.getuid?.() === 0) return;
 		const b = makeBridge();
 		const locked = join(tempDir, "locked");
