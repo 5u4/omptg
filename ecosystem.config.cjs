@@ -18,8 +18,8 @@ module.exports = {
 	apps: [
 		{
 			name: "omptg",
-			script: "src/main.ts",
-			interpreter: "bun",
+			script: "bun",
+			args: ["run", "src/main.ts"],
 			// Run from the directory holding this config so relative `src/`
 			// resolves and `.env` / `logs/` land alongside the code.
 			cwd: __dirname,
