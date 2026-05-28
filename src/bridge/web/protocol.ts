@@ -34,6 +34,20 @@ export interface SessionSummary {
 	/** Session file path on disk (for resume / inspection). undefined
 	 *  before the first prompt has run on a fresh session. */
 	sessionFile?: string;
+	/** Folder grouping; undefined = ungrouped. */
+	folderId?: string;
+}
+
+/** Folder grouping for the session rail. A folder is a thin UI
+ *  pointer: a name + a default cwd. The server does NOT enforce cwd
+ *  uniqueness across folders — multiple folders may point at the
+ *  same working directory, and ungrouped sessions may share a cwd
+ *  with a folder. Folder is purely a grouping label. */
+export interface FolderSummary {
+	id: string;          // "f:<n>", monotonic
+	name: string;        // user-supplied; trimmed; non-empty; length ≤ 80
+	cwd: string;         // canonicalized absolute path
+	createdAt: number;
 }
 
 /** UI dialog the agent posted; client renders an inline form and answers
@@ -82,6 +96,9 @@ export type ServerMsg =
 	| { type: "session.created"; session: SessionSummary }
 	| { type: "session.updated"; key: string; patch: Partial<SessionSummary> }
 	| { type: "session.removed"; key: string }
+	| { type: "folder.list"; folders: FolderSummary[] }
+	| { type: "folder.created"; folder: FolderSummary }
+	| { type: "folder.updated"; id: string; patch: Partial<Pick<FolderSummary, "name">> }
 	| { type: "session.event"; key: string; seq: number; event: SessionEvent }
 	| { type: "session.turn"; key: string; active: boolean }
 	| { type: "session.backfill"; key: string; from: number; earliestSeq: number; events: Array<{ seq: number; event: SessionEvent }> }
@@ -92,10 +109,15 @@ export type ServerMsg =
 // --- Client → Server --------------------------------------------------------
 
 export type ClientMsg =
-	/** Create a fresh session bound to `cwd` (default cwd if omitted). */
-	| { type: "session.open"; cwd?: string }
+	/** Create a fresh session bound to `cwd` (default cwd if omitted).
+	 *  When `folderId` is set the server resolves the folder, uses
+	 *  the folder's recorded cwd, and tags the new session with
+	 *  `folderId`. A client-supplied `cwd` is ignored in that case. */
+	| { type: "session.open"; cwd?: string; folderId?: string }
 	/** Resume an existing omp session file as a new web session. */
 	| { type: "session.resume"; sessionFile: string; cwd?: string }
+	| { type: "folder.create"; name: string; cwd: string }
+	| { type: "folder.rename"; id: string; name: string }
 	/** Send a user turn. */
 	| { type: "session.send"; key: string; text: string }
 	/** Abort the in-flight turn. */

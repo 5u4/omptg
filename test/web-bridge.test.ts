@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebBridge } from "../src/bridge/web/index.ts";
 import type { ServerMsg } from "../src/bridge/web/protocol.ts";
+import { startWebServer, type RunningServer } from "../src/bridge/web/server.ts";
 
 interface FakeSub {
 	send(msg: ServerMsg): void;
@@ -310,5 +311,38 @@ describe("WebBridge", () => {
 		const link = join(tempDir, "escape");
 		symlinkSync("/etc", link);
 		expect(b.validateCwd(link)).toBeUndefined();
+	});
+
+	it("ws handshake: folder.list arrives before session.list", async () => {
+		const b = makeBridge();
+		b.createFolder({ name: "first", cwd: tempDir });
+		const running: RunningServer = startWebServer({ host: "127.0.0.1", port: 0, bridge: b });
+		try {
+			const url = running.server.url;
+			const wsUrl = `ws://${url.hostname}:${url.port}/ws`;
+			const ws = new WebSocket(wsUrl);
+			const messages: ServerMsg[] = [];
+			const opened = new Promise<void>((resolve, reject) => {
+				ws.addEventListener("open", () => resolve());
+				ws.addEventListener("error", () => reject(new Error("ws error")));
+			});
+			ws.addEventListener("message", ev => {
+				messages.push(JSON.parse(String(ev.data)) as ServerMsg);
+			});
+			await opened;
+			// Wait for both handshake envelopes.
+			const deadline = Date.now() + 2000;
+			while (messages.length < 2 && Date.now() < deadline) {
+				await new Promise(r => setTimeout(r, 10));
+			}
+			ws.close();
+			expect(messages[0]?.type).toBe("folder.list");
+			expect(messages[1]?.type).toBe("session.list");
+			if (messages[0]?.type === "folder.list") {
+				expect(messages[0].folders).toHaveLength(1);
+			}
+		} finally {
+			await running.stop();
+		}
 	});
 });

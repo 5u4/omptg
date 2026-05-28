@@ -26,7 +26,7 @@ import type {
 	Streamer,
 	Typing,
 } from "../types.ts";
-import type { ServerMsg, SessionEvent, SessionSummary, UiRequestPayload } from "./protocol.ts";
+import type { FolderSummary, ServerMsg, SessionEvent, SessionSummary, UiRequestPayload } from "./protocol.ts";
 import { WebStreamer } from "./streamer.ts";
 import { WebUI } from "./ui.ts";
 import { scoped } from "../../logger.ts";
@@ -69,12 +69,27 @@ interface PersistedSession {
 	title: string;
 	modelId?: string;
 	lastActivity: number;
+	/** Folder grouping; undefined = ungrouped. Immutable post-create
+	 *  in this phase — no UI exists to move sessions between folders. */
+	folderId?: string;
+}
+
+/** Persisted-to-disk snapshot of a folder. Same shape as the wire
+ *  `FolderSummary`; kept separate so a future divergence (e.g. an
+ *  internal-only field) doesn't leak into the protocol. */
+interface PersistedFolder {
+	id: string;
+	name: string;
+	cwd: string;
+	createdAt: number;
 }
 
 interface PersistedState {
-	version: 1;
+	version: 2;
 	nextId: number;
+	nextFolderId: number;
 	sessions: PersistedSession[];
+	folders: PersistedFolder[];
 }
 
 class WebTyping implements Typing {
@@ -133,6 +148,9 @@ export class WebBridge implements Bridge {
 	private nextId: number;
 	/** routeKey → metadata. Mirrored to disk via `persist()`. */
 	private readonly sessions = new Map<string, PersistedSession>();
+	/** folderId → folder record. Mirrored to disk via `persist()`. */
+	private readonly folders = new Map<string, PersistedFolder>();
+	private nextFolderId = 1;
 	/** routeKey → ring buffer of recent events. */
 	private readonly rings = new Map<string, RingEntry[]>();
 	/** routeKey → monotonic sequence number for events. */
@@ -159,6 +177,8 @@ export class WebBridge implements Bridge {
 		this.stateFile = opts.stateFile ?? defaultStateFile();
 		const loaded = loadState(this.stateFile);
 		this.nextId = loaded.nextId;
+		this.nextFolderId = loaded.nextFolderId;
+		for (const f of loaded.folders) this.folders.set(f.id, f);
 		for (const s of loaded.sessions) this.sessions.set(s.key, s);
 		this.allowedCwdPrefixes = opts.allowedCwdPrefixes ?? [];
 		this.canonicalDefaultCwd = canonicalize(opts.defaultCwd);
@@ -238,7 +258,56 @@ export class WebBridge implements Bridge {
 				lastActivity: s.lastActivity,
 				turnActive: this.turnState.get(s.key) ?? false,
 				sessionFile: s.sessionFile,
+				folderId: s.folderId,
 			}));
+	}
+
+	/** Snapshot for `folder.list`. Ascending by `createdAt` per
+	 *  Phase 5 §6.1; ties broken by id to keep order deterministic
+	 *  when two folders land in the same millisecond. */
+	listFolders(): FolderSummary[] {
+		return [...this.folders.values()]
+			.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1))
+			.map(f => ({ id: f.id, name: f.name, cwd: f.cwd, createdAt: f.createdAt }));
+	}
+
+	/** Resolve a folder id to its recorded cwd. Server uses this to
+	 *  force `session.open({folderId})` to land in the folder's cwd
+	 *  regardless of what the client supplied. */
+	folderCwd(id: string): string | undefined {
+		return this.folders.get(id)?.cwd;
+	}
+
+	/** Create a folder. Caller is responsible for cwd validation
+	 *  (same allowlist as session.open); the bridge stores whatever
+	 *  it's handed. cwd uniqueness across folders is NOT enforced. */
+	createFolder(input: { name: string; cwd: string }): { ok: true; folder: FolderSummary } | { ok: false; reason: "empty-name" | "name-too-long" } {
+		// `input` lands here straight from the wire; coerce defensively
+		// so a malformed payload (missing/non-string name) returns a
+		// clean error envelope instead of throwing TypeError out of an
+		// async ws message handler as an unhandled rejection.
+		const name = typeof input.name === "string" ? input.name.trim() : "";
+		if (!name) return { ok: false, reason: "empty-name" };
+		if (name.length > 80) return { ok: false, reason: "name-too-long" };
+		const id = `f:${this.nextFolderId++}`;
+		const folder: PersistedFolder = { id, name, cwd: input.cwd, createdAt: Date.now() };
+		this.folders.set(id, folder);
+		this.schedulePersist();
+		const summary: FolderSummary = { id, name, cwd: folder.cwd, createdAt: folder.createdAt };
+		this.broadcast({ type: "folder.created", folder: summary });
+		return { ok: true, folder: summary };
+	}
+
+	renameFolder(id: string, name: string): { ok: true } | { ok: false; reason: "unknown" | "empty-name" | "name-too-long" } {
+		const cur = this.folders.get(id);
+		if (!cur) return { ok: false, reason: "unknown" };
+		const trimmed = typeof name === "string" ? name.trim() : "";
+		if (!trimmed) return { ok: false, reason: "empty-name" };
+		if (trimmed.length > 80) return { ok: false, reason: "name-too-long" };
+		cur.name = trimmed;
+		this.schedulePersist();
+		this.broadcast({ type: "folder.updated", id, patch: { name: trimmed } });
+		return { ok: true };
 	}
 
 	/** Apply a metadata patch — called by the server when ChatSession
@@ -259,6 +328,7 @@ export class WebBridge implements Bridge {
 			sessionFile: cur.sessionFile,
 			modelId: cur.modelId,
 			lastActivity: cur.lastActivity,
+			folderId: cur.folderId,
 		} });
 	}
 
@@ -379,9 +449,11 @@ export class WebBridge implements Bridge {
 	private persistNow(): void {
 		try {
 			const state: PersistedState = {
-				version: 1,
+				version: 2,
 				nextId: this.nextId,
+				nextFolderId: this.nextFolderId,
 				sessions: [...this.sessions.values()],
+				folders: [...this.folders.values()],
 			};
 			// Atomic: write to a sibling tmp then rename. A torn write
 			// or SIGKILL between the writeFileSync and renameSync
@@ -437,16 +509,50 @@ function defaultStateFile(): string {
 }
 
 function loadState(path: string): PersistedState {
-	if (!existsSync(path)) return { version: 1, nextId: 1, sessions: [] };
+	const empty: PersistedState = { version: 2, nextId: 1, nextFolderId: 1, sessions: [], folders: [] };
+	if (!existsSync(path)) return empty;
 	try {
-		const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<PersistedState>;
-		if (parsed && parsed.version === 1 && Array.isArray(parsed.sessions) && typeof parsed.nextId === "number") {
-			return { version: 1, nextId: parsed.nextId, sessions: parsed.sessions as PersistedSession[] };
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+			version?: number;
+			nextId?: number;
+			nextFolderId?: number;
+			sessions?: unknown;
+			folders?: unknown;
+		};
+		if (!parsed || typeof parsed.nextId !== "number" || !Array.isArray(parsed.sessions)) return empty;
+		const sessions = parsed.sessions as PersistedSession[];
+		if (parsed.version === 2) {
+			const folders = Array.isArray(parsed.folders) ? (parsed.folders as PersistedFolder[]) : [];
+			const nextFolderId = reconcileNext(parsed.nextFolderId, folders, f => f.id);
+			return { version: 2, nextId: parsed.nextId, nextFolderId, sessions, folders };
+		}
+		if (parsed.version === 1) {
+			// v1 → v2: no folders existed; sessions land in Ungrouped
+			// (folderId stays undefined — the new optional field on
+			// PersistedSession simply isn't present in legacy JSON,
+			// which JSON.parse leaves as `undefined`).
+			return { version: 2, nextId: parsed.nextId, nextFolderId: 1, sessions, folders: [] };
 		}
 	} catch (err) {
 		log.warn("load_failed", { err: String(err), path });
 	}
-	return { version: 1, nextId: 1, sessions: [] };
+	return empty;
+}
+
+/** Recover a monotonic-id counter from disk. Trusting `parsed.next`
+ *  alone is fragile: a hand-edited or partially-restored state file
+ *  with `next: 1` and existing `f:5` would re-mint `f:1` on the
+ *  next create, silently overwriting the older entry in the Map.
+ *  Reconcile by taking the max of the persisted counter and one past
+ *  the highest existing numeric suffix. */
+function reconcileNext<T>(persisted: unknown, items: readonly T[], idOf: (item: T) => string): number {
+	let max = typeof persisted === "number" && Number.isFinite(persisted) ? persisted : 1;
+	for (const item of items) {
+		const tail = idOf(item).split(":")[1];
+		const n = tail !== undefined ? Number(tail) : NaN;
+		if (Number.isFinite(n) && n + 1 > max) max = n + 1;
+	}
+	return max;
 }
 
 /** Path-prefix check: true when `path` equals `prefix` or is nested
