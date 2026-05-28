@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebBridge } from "../src/bridge/web/index.ts";
@@ -191,9 +191,15 @@ describe("WebBridge", () => {
 		// Use tempdir-derived paths so the assertions don't depend on
 		// platform-specific realpath behavior (e.g. /etc → /private/etc
 		// on macOS).
-		const elsewhere = join(tempDir, "elsewhere");
-		expect(b.validateCwd(elsewhere)).toBe(elsewhere);
-		expect(b.validateCwd("/var/lib/nonexistent-omptg-test")).toBe("/var/lib/nonexistent-omptg-test");
+		const insideDefault = join(tempDir, "elsewhere");
+		expect(b.validateCwd(insideDefault)).toBe(insideDefault);
+		// And a path that lives entirely outside defaultCwd — derived
+		// from a real tempdir we delete immediately so the assertion
+		// doesn't depend on any pre-existing host path.
+		const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), "omptg-outside-")));
+		rmSync(outsideRoot, { recursive: true, force: true });
+		const outside = join(outsideRoot, "child");
+		expect(b.validateCwd(outside)).toBe(outside);
 	});
 
 	it("ui.cancel reaches sibling subscribers when one client resolves a ui.request", () => {
@@ -226,9 +232,9 @@ describe("WebBridge", () => {
 		const b = makeBridge();
 		expect(b.resolveCwd(undefined)).toEqual({ ok: true, cwd: tempDir });
 		expect(b.resolveCwd(tempDir)).toEqual({ ok: true, cwd: tempDir });
-		// Relative paths are the only "denied" case now that the
-		// allowlist is gone — everything else fails through missing /
-		// not-a-directory based on filesystem reality.
+		// `denied` now covers two cases: relative paths (rejected at
+		// validateCwd) and EACCES/EPERM from statSync. The latter is
+		// exercised in a separate test so we don't need root here.
 		expect(b.resolveCwd("relative/path")).toEqual({ ok: false, reason: "denied" });
 		expect(b.resolveCwd("/this/path/should/not/exist")).toEqual({ ok: false, reason: "missing" });
 
@@ -240,6 +246,24 @@ describe("WebBridge", () => {
 		const file = join(tempDir, "f");
 		writeFileSync(file, "x");
 		expect(b.resolveCwd(file)).toEqual({ ok: false, reason: "not-a-directory" });
+	});
+
+	it("resolveCwd maps EACCES/EPERM to denied", () => {
+		// statSync on a 0o000 directory raises EACCES for non-root.
+		// Skip when running as root (CI containers sometimes do) since
+		// the chmod no-ops there and the test would spuriously fail.
+		if (process.getuid?.() === 0) return;
+		const b = makeBridge();
+		const locked = join(tempDir, "locked");
+		mkdirSync(locked);
+		const inner = join(locked, "child");
+		mkdirSync(inner);
+		chmodSync(locked, 0o000);
+		try {
+			expect(b.resolveCwd(inner)).toEqual({ ok: false, reason: "denied" });
+		} finally {
+			chmodSync(locked, 0o700);  // so afterEach rmSync can clean up
+		}
 	});
 
 	it("modelId is broadcast on patchSession and surfaces in listSessions", () => {

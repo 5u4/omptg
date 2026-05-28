@@ -470,20 +470,24 @@ export class WebBridge implements Bridge {
 		if (!isAbsolute(cwd)) return undefined;
 		return canonicalize(resolvePath(cwd));
 	}
-
 	/** Stricter form of validateCwd: also stat-checks the resolved path
-	 *  so the server can surface a specific "no such directory" /
-	 *  "not a directory" error instead of a generic chat.ensure() failure
-	 *  several layers down. */
+	 *  so the server can surface a specific reason instead of a generic
+	 *  chat.ensure() failure several layers down.
+	 *  - `denied`    — relative cwd, or stat hit EACCES/EPERM
+	 *  - `missing`   — ENOENT (or any other stat failure besides EACCES)
+	 *  - `not-a-directory` — exists but is a file/socket/etc. */
 	resolveCwd(cwd: string | undefined): { ok: true; cwd: string } | { ok: false; reason: "denied" | "missing" | "not-a-directory" } {
 		const allowed = this.validateCwd(cwd);
 		if (!allowed) return { ok: false, reason: "denied" };
-		if (!existsSync(allowed)) return { ok: false, reason: "missing" };
+		let st;
 		try {
-			if (!statSync(allowed).isDirectory()) return { ok: false, reason: "not-a-directory" };
-		} catch {
+			st = statSync(allowed);
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code === "EACCES" || code === "EPERM") return { ok: false, reason: "denied" };
 			return { ok: false, reason: "missing" };
 		}
+		if (!st.isDirectory()) return { ok: false, reason: "not-a-directory" };
 		return { ok: true, cwd: allowed };
 	}
 }
