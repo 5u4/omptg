@@ -62,11 +62,10 @@ This pulls `grammy`, `@oh-my-pi/pi-coding-agent`, and the rest. Frontend deps un
 
 ## Step 4 — Confirm OMP resolves
 
-The agent SDK is pulled in by `bun install`; OMP itself only writes `~/.omp/agent/` the first time a real session runs (which happens when the human DMs the bot, not now). Just confirm the CLI resolves and the `~/.omp/` root gets created:
+The agent SDK is pulled in by `bun install`; OMP itself only writes `~/.omp/agent/` the first time a real session runs (which happens when the human DMs the bot, not now). Confirm the CLI resolves:
 
 ```bash
-bunx --bun omp --help >/dev/null
-test -d ~/.omp && echo "OMP reachable"
+bunx --bun omp --help >/dev/null && echo "OMP CLI resolves"
 ```
 
 This is a sanity check that `node_modules/.bin/omp` was created by Step 3 — it doesn't install or configure anything OMP-side. Provider credentials (OpenAI / Anthropic / GitHub Copilot / etc.) are OMP's concern, not omptg's; they are **not** part of omptg's `.env`. The human handles them in HUMAN HANDOFF step C. Do **not** invent keys or pre-populate `~/.omp/agent/config.yml`.

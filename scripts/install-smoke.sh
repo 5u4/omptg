@@ -52,7 +52,6 @@ bun install
 
 echo "== Step 4: confirm OMP resolves =="
 bunx --bun omp --help >/dev/null
-test -d "$HOME/.omp"
 echo "OMP CLI resolves"
 
 echo "== Step 5: .env from template =="
@@ -81,7 +80,6 @@ docker pull -q "$IMAGE" >/dev/null
 
 echo ">> running install.md walkthrough against $REPO_ROOT in clean container"
 docker run --rm \
-  --network host \
   -e HOME=/root \
   -w /root \
   -v "$REPO_ROOT:/src:ro" \
