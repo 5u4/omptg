@@ -14,6 +14,10 @@
  * service on Linux, and registers a service on Windows — one config,
  * all platforms.
  */
+const { delimiter } = require("node:path");
+const { homedir } = require("node:os");
+const HOME = homedir();
+
 module.exports = {
 	apps: [
 		{
@@ -46,8 +50,12 @@ module.exports = {
 			merge_logs: true,
 			log_date_format: "YYYY-MM-DD HH:mm:ss",
 
+			// Make user-local installs (uv, pipx, cargo) visible to spawned
+			// subprocesses. PM2 inherits the daemon's PATH, which on a fresh
+			// login shell usually omits ~/.local/bin.
 			env: {
 				NODE_ENV: "production",
+				PATH: [`${HOME}/.local/bin`, `${HOME}/.cargo/bin`, process.env.PATH].filter(Boolean).join(delimiter),
 			},
 		},
 	],

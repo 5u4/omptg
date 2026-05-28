@@ -14,6 +14,7 @@
  */
 import type {
 	ClientMsg,
+	FolderSummary,
 	ServerMsg,
 	SessionEvent,
 	SessionSummary,
@@ -53,6 +54,26 @@ const MOTION = new Set<SessionEvent["kind"]>([
 	"assistant", "preamble", "notice", "replace",
 	"tool_start", "tool_end", "finalize",
 ]);
+/** Re-exported so consumers don't need a second import for folders. */
+export type Folder = FolderSummary;
+
+const COLLAPSED_KEY = "omptg:foldersCollapsed";
+
+function loadCollapsed(): Set<string> {
+	if (typeof localStorage === "undefined") return new Set();
+	try {
+		const raw = localStorage.getItem(COLLAPSED_KEY);
+		if (!raw) return new Set();
+		const arr = JSON.parse(raw) as unknown;
+		if (Array.isArray(arr)) return new Set(arr.filter((x): x is string => typeof x === "string"));
+	} catch { /* ignore */ }
+	return new Set();
+}
+
+function saveCollapsed(set: Set<string>): void {
+	if (typeof localStorage === "undefined") return;
+	try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set])); } catch { /* ignore */ }
+}
 
 export class Session {
 	readonly key: string;
@@ -62,6 +83,7 @@ export class Session {
 	sessionFile = $state("");
 	turnActive = $state(false);
 	lastActivity = $state(0);
+	folderId = $state<string | undefined>(undefined);
 	unread = $state(0);
 	rows = $state<Row[]>([]);
 	liveText = $state("");
@@ -89,16 +111,47 @@ export class Session {
 		this.sessionFile = summary.sessionFile ?? "";
 		this.turnActive = summary.turnActive ?? false;
 		this.lastActivity = summary.lastActivity ?? 0;
+		this.folderId = summary.folderId;
 	}
 }
 
 class Store {
 	sessions = $state<Session[]>([]);
+	folders = $state<Folder[]>([]);
+	collapsed = $state<Set<string>>(loadCollapsed());
 	activeKey = $state<string | null>(null);
 	connState = $state<"live" | "down" | "connecting">("connecting");
 
 	activeSession = $derived(this.sessions.find(s => s.key === this.activeKey));
 	totalUnread = $derived(this.sessions.reduce((sum, s) => sum + s.unread, 0));
+
+	/** Grouped view used by the rail. `byFolder` is keyed by folder id;
+	 *  iterate `folders` for the canonical order. `ungrouped` is the
+	 *  session list with no `folderId` set, OR with a folderId that
+	 *  doesn't match any known folder — without that fallback an
+	 *  orphan would disappear from both lists. */
+	groupedSessions = $derived.by(() => {
+		const known = new Set(this.folders.map(f => f.id));
+		const byFolder = new Map<string, Session[]>();
+		const ungrouped: Session[] = [];
+		for (const s of this.sessions) {
+			if (s.folderId !== undefined && known.has(s.folderId)) {
+				let list = byFolder.get(s.folderId);
+				if (!list) { list = []; byFolder.set(s.folderId, list); }
+				list.push(s);
+			} else {
+				ungrouped.push(s);
+			}
+		}
+		return { byFolder, ungrouped };
+	});
+
+	toggleFolder(id: string): void {
+		const next = new Set(this.collapsed);
+		if (next.has(id)) next.delete(id); else next.add(id);
+		this.collapsed = next;
+		saveCollapsed(next);
+	}
 
 	find(key: string): Session | undefined {
 		return this.sessions.find(s => s.key === key);
@@ -113,6 +166,7 @@ class Store {
 			if (summary.sessionFile !== undefined) existing.sessionFile = summary.sessionFile;
 			if (summary.turnActive !== undefined) existing.turnActive = summary.turnActive;
 			if (summary.lastActivity !== undefined) existing.lastActivity = summary.lastActivity;
+			if (summary.folderId !== undefined) existing.folderId = summary.folderId;
 			return existing;
 		}
 		const s = new Session(summary);
@@ -265,6 +319,7 @@ function handle(msg: ServerMsg): void {
 					existing.sessionFile = summary.sessionFile ?? "";
 					existing.turnActive = summary.turnActive;
 					existing.lastActivity = summary.lastActivity;
+					existing.folderId = summary.folderId;
 					next.push(existing);
 				} else {
 					next.push(new Session(summary));
@@ -322,6 +377,23 @@ function handle(msg: ServerMsg): void {
 		case "error":
 			console.warn("[server error]", msg.message, msg.cause);
 			break;
+		case "folder.list":
+			store.folders = [...msg.folders];
+			break;
+		case "folder.created":
+			// Ties broken by the numeric suffix of `id` so `f:10` doesn't
+			// jump ahead of `f:2` when two folders land in the same ms.
+			store.folders = [...store.folders, msg.folder].sort((a, b) => {
+				if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+				const an = Number(a.id.split(":")[1]);
+				const bn = Number(b.id.split(":")[1]);
+				return Number.isFinite(an) && Number.isFinite(bn) ? an - bn : 0;
+			});
+			break;
+		case "folder.updated":
+			store.folders = store.folders.map(f =>
+				f.id === msg.id ? { ...f, ...msg.patch } : f);
+			break;
 	}
 }
 
@@ -332,7 +404,17 @@ function resubscribe(): void {
 
 // --- session ops ---------------------------------------------------------
 
-export function openNewSession(): void { send({ type: "session.open" }); }
+export function openNewSession(opts: { folderId?: string; cwd?: string } = {}): void {
+	send({ type: "session.open", folderId: opts.folderId, cwd: opts.cwd });
+}
+
+export function createFolder(name: string, cwd: string): void {
+	send({ type: "folder.create", name, cwd });
+}
+
+export function renameFolder(id: string, name: string): void {
+	send({ type: "folder.rename", id, name });
+}
 
 export function sendPrompt(key: string, text: string): void {
 	const trimmed = text.trim();

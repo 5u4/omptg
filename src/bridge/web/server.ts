@@ -174,12 +174,45 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 
 		switch (msg.type) {
 			case "session.open": {
-				const r = bridge.resolveCwd(msg.cwd);
-				if (!r.ok) {
-					state.send({ type: "error", message: `cwd ${r.reason}: ${msg.cwd ?? "<default>"}` });
-					return;
+				// Resolve cwd: folderId wins. The folder's recorded cwd
+				// is authoritative — any client-supplied `cwd` is
+				// ignored in that case (and logged when it disagrees,
+				// so we notice if some future client starts sending
+				// inconsistent values).
+				let cwd: string;
+				let folderId: string | undefined;
+				if (msg.folderId !== undefined) {
+					const folderCwd = bridge.folderCwd(msg.folderId);
+					if (!folderCwd) {
+						state.send({ type: "error", message: `unknown folder: ${msg.folderId}` });
+						return;
+					}
+					if (msg.cwd && msg.cwd !== folderCwd) {
+						log.info("session.open.folder_cwd_override", {
+							folderId: msg.folderId,
+							supplied: msg.cwd,
+							used: folderCwd,
+						});
+					}
+					// Folder cwd was already validated at create time;
+					// re-run resolveCwd anyway so a moved/deleted dir
+					// surfaces as a clean error rather than a deeper
+					// chat.ensure() failure.
+					const r = bridge.resolveCwd(folderCwd);
+					if (!r.ok) {
+						state.send({ type: "error", message: `folder cwd ${r.reason}: ${folderCwd}` });
+						return;
+					}
+					cwd = r.cwd;
+					folderId = msg.folderId;
+				} else {
+					const r = bridge.resolveCwd(msg.cwd);
+					if (!r.ok) {
+						state.send({ type: "error", message: `cwd ${r.reason}: ${msg.cwd ?? "<default>"}` });
+						return;
+					}
+					cwd = r.cwd;
 				}
-				const cwd = r.cwd;
 				const route = bridge.mintRoute();
 				const chat = getOrCreateChat(route.key, cwd);
 				try { await chat.newSession(); } catch (err) {
@@ -192,6 +225,7 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 					sessionFile: chat.sessionFile,
 					title: chat.sessionName ?? "",
 					modelId: chat.modelId,
+					folderId,
 				});
 				const s = summaryFor(route.key);
 				if (s) state.send({ type: "session.created", session: s });
@@ -286,6 +320,37 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				if (ok) bridge.broadcastUiCancelFor(msg.key, msg.reqId);
 				break;
 			}
+			case "folder.create": {
+				// Protocol declares `cwd: string`, but a malformed wire
+				// payload (missing/empty) would slip through resolveCwd
+				// → silently bind the new folder to defaultCwd. Reject
+				// up front so the user sees a clear error.
+				if (typeof msg.cwd !== "string" || !msg.cwd) {
+					state.send({ type: "error", message: "folder.create: cwd is required" });
+					return;
+				}
+				const r = bridge.resolveCwd(msg.cwd);
+				if (!r.ok) {
+					state.send({ type: "error", message: `cwd ${r.reason}: ${msg.cwd}` });
+					return;
+				}
+				const res = bridge.createFolder({ name: msg.name, cwd: r.cwd });
+				if (!res.ok) {
+					state.send({ type: "error", message: `folder create: ${res.reason}` });
+				}
+				break;
+			}
+			case "folder.rename": {
+				if (typeof msg.id !== "string" || !msg.id) {
+					state.send({ type: "error", message: "folder.rename: id is required" });
+					return;
+				}
+				const res = bridge.renameFolder(msg.id, msg.name);
+				if (!res.ok) {
+					state.send({ type: "error", message: `folder rename: ${res.reason}` });
+				}
+				break;
+			}
 			default:
 				state.send({ type: "error", message: `unknown type: ${(msg as { type?: string }).type}` });
 		}
@@ -325,6 +390,10 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 					}
 				};
 				bridge.addSubscriber(state);
+				// Folders first so the client has the grouping metadata
+				// in hand before any session.created/session.list event
+				// references a folderId.
+				state.send({ type: "folder.list", folders: bridge.listFolders() });
 				// Send the initial session list so the client can render.
 				state.send({ type: "session.list", sessions: bridge.listSessions() });
 				log.info("ws.open", { id: state.id });

@@ -17,6 +17,6 @@ const session = $derived(store.activeSession);
 {:else}
 	<div class="flex flex-col items-center justify-center gap-3 p-10 text-center text-muted-foreground">
 		<div>Open a session to get started.</div>
-		<Button variant="default" onclick={openNewSession}>+ new session</Button>
+		<Button variant="default" onclick={() => openNewSession()}>+ new session</Button>
 	</div>
 {/if}
