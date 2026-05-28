@@ -9,10 +9,10 @@ import Button from "$lib/components/ui/Button.svelte";
  *                    `onSubmit("", cwd)`.
  *
  * Closes optimistically on submit. Server-side failures (e.g. cwd
- * outside the allowlist) currently surface only as a console.warn from
- * the store's `error` handler — the user sees the dialog close with no
- * folder appearing in the rail. A real toast/inline-error pass is
- * tracked for a later UX phase.
+ * missing or not a directory) currently surface only as a console.warn
+ * from the store's `error` handler — the user sees the dialog close
+ * with no folder appearing in the rail. A real toast/inline-error pass
+ * is tracked for a later UX phase.
  */
 let {
 	mode,

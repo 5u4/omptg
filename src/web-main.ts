@@ -6,9 +6,6 @@
  *   OMP_DEFAULT_CWD          default cwd for fresh sessions (~/.omptg if unset)
  *   OMPTG_WEB_HOST           bind host; non-loopback warns loudly (default 127.0.0.1)
  *   OMPTG_WEB_PORT           listen port; rejects NaN/out-of-range (default 7878)
- *   OMPTG_WEB_ALLOWED_CWDS   colon-separated path prefixes clients may use on
- *                            session.open / session.resume in addition to
- *                            OMP_DEFAULT_CWD (default: defaultCwd subtree only)
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -37,14 +34,6 @@ function resolveDefaultCwd(): string {
 	const fallback = resolvePath(homedir(), ".omptg");
 	if (!existsSync(fallback)) mkdirSync(fallback, { recursive: true });
 	return fallback;
-}
-
-/** Parse `OMPTG_WEB_ALLOWED_CWDS`: colon-separated path prefixes that
- *  clients may use on `session.open` / `session.resume` in addition to
- *  `DEFAULT_CWD`. Unset/empty means "DEFAULT_CWD subtree only". */
-function parseAllowedPrefixes(raw: string | undefined): string[] {
-	if (!raw) return [];
-	return raw.split(":").map(p => p.trim()).filter(Boolean).map(resolveDir);
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -84,10 +73,7 @@ const PORT = resolvePort(Bun.env.OMPTG_WEB_PORT);
 await runLogRotation();
 await initOmpTheme();
 
-const bridge = new WebBridge({
-	defaultCwd: DEFAULT_CWD,
-	allowedCwdPrefixes: parseAllowedPrefixes(Bun.env.OMPTG_WEB_ALLOWED_CWDS),
-});
+const bridge = new WebBridge({ defaultCwd: DEFAULT_CWD });
 const running = startWebServer({ host: HOST, port: PORT, bridge });
 
 log.info("boot.ready", { host: HOST, port: PORT, cwd: DEFAULT_CWD, log: logPath() });
