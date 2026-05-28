@@ -31,6 +31,7 @@ function onKeydown(e: KeyboardEvent): void {
 	onclick={onCancel}
 	role="dialog"
 	aria-modal="true"
+	aria-labelledby="rename-folder-dialog-title"
 	tabindex="-1"
 >
 	<div
@@ -38,7 +39,7 @@ function onKeydown(e: KeyboardEvent): void {
 		onclick={(e) => e.stopPropagation()}
 		role="document"
 	>
-		<div class="mb-3 text-base font-semibold">Rename folder</div>
+		<div id="rename-folder-dialog-title" class="mb-3 text-base font-semibold">Rename folder</div>
 
 		<form
 			onsubmit={(e) => { e.preventDefault(); submit(); }}

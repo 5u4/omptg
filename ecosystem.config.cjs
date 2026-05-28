@@ -14,6 +14,10 @@
  * service on Linux, and registers a service on Windows — one config,
  * all platforms.
  */
+const { delimiter } = require("node:path");
+const { homedir } = require("node:os");
+const HOME = homedir();
+
 module.exports = {
 	apps: [
 		{
@@ -51,7 +55,7 @@ module.exports = {
 			// login shell usually omits ~/.local/bin.
 			env: {
 				NODE_ENV: "production",
-				PATH: `${process.env.HOME}/.local/bin:${process.env.HOME}/.cargo/bin:${process.env.PATH}`,
+				PATH: [`${HOME}/.local/bin`, `${HOME}/.cargo/bin`, process.env.PATH].filter(Boolean).join(delimiter),
 			},
 		},
 	],

@@ -54,6 +54,7 @@ function onKeydown(e: KeyboardEvent): void {
 	onclick={onCancel}
 	role="dialog"
 	aria-modal="true"
+	aria-labelledby="new-folder-dialog-title"
 	tabindex="-1"
 >
 	<div
@@ -61,7 +62,7 @@ function onKeydown(e: KeyboardEvent): void {
 		onclick={(e) => e.stopPropagation()}
 		role="document"
 	>
-		<div class="mb-3 text-base font-semibold">{title}</div>
+		<div id="new-folder-dialog-title" class="mb-3 text-base font-semibold">{title}</div>
 
 		<form
 			onsubmit={(e) => { e.preventDefault(); submit(); }}
