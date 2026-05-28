@@ -167,4 +167,53 @@ describe("splitMarkdownForTelegram", () => {
 		expect(md).not.toContain("———");
 	});
 
+
+	test("neutralizes inline code containing only `\\` (would eat closing backtick)", () => {
+		// Regression: an inline `` `\` `` span reaches Telegram as
+		// "` \ `" where the backslash escapes the closing backtick →
+		// span never closes → entity offsets shift → HTTP 400. We
+		// replace `\` with U+FF3C inside spans so the codepoint stays
+		// visually equivalent but parser-inert.
+		const src = "see `\\` for details";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		expect(md).not.toMatch(/`\\`/);
+		expect(md).toContain("\uFF3C");
+	});
+
+	test("flattens 4-backtick spans (CommonMark allows runs of any length)", () => {
+		// Regression: original regex only matched exactly two
+		// backticks, leaving GFM `` ```` ` ```` `` (4 outer, 1 inner)
+		// untouched. telegramify-markdown then preserved them and
+		// telegram parsed each backtick independently.
+		const src = "use ```` ` ```` to embed a backtick";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		// No run of ≥2 backticks survives.
+		expect(md).not.toMatch(/``+/);
+	});
+
+	test("does NOT treat CommonMark-escaped backticks (`\\``) as span delimiters", () => {
+		// Regression: a backslash-escaped backtick is literal text per
+		// CommonMark and must not open or close a code span. Without
+		// the (?<!\\) lookbehind, input like \`literal\` was rewritten
+		// as a span and the closing escape became U+FF3C.
+		const src = "literal \\`foo\\` here";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		// The word "foo" survives without being wrapped in real
+		// backticks (telegramify will escape the source backticks).
+		expect(md).not.toMatch(/`foo`/);
+		// And no fullwidth backslash leaks into the escape sequence.
+		expect(md).not.toContain("\uFF3C");
+	});
+
+	test("correctly classifies 3-backslash run before backtick as escaped", () => {
+		// Regression for the fixed-window lookbehind: 3 (or any odd N ≥ 3)
+		// consecutive backslashes before a backtick still escape it per
+		// CommonMark (pairs become escaped backslashes, the last `\`
+		// escapes the backtick). The match callback now counts the full
+		// run instead of peeking only 2 chars back.
+		const src = "literal \\\\\\`foo\\\\\\` here";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		expect(md).not.toMatch(/`foo`/);
+		expect(md).not.toContain("\uFF3C");
+	});
 });
