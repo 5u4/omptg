@@ -7,8 +7,11 @@
  *   - `ompui:<requestId>:<value>` — TelegramUI pending-request resolution
  *      (select / confirm / input answer). Routed through chat.resolvePending.
  *
- * For both, on success we strip the inline keyboard so the buttons can't
- * be re-pressed and the message stays as plain context.
+ * For the voice branch we explicitly strip the inline keyboard after
+ * dispatch. For the ompui branch the cleanup is centralized in
+ * `TelegramUI`'s finalize closures: they edit the carrier text to show
+ * the chosen option, and editMessageText without `reply_markup`
+ * implicitly drops the keyboard.
  */
 import type { Deps } from "../deps.ts";
 import { scoped } from "../logger.ts";
@@ -90,16 +93,9 @@ export function installCallbackHandler(deps: Deps): void {
 		});
 		log.info("resolved", { ok, chat_id: chatId, req_id: parsed.requestId });
 		await ctx.answerCallbackQuery(ok ? undefined : "expired");
-		if (ok && ctx.callbackQuery.message) {
-			try {
-				await ctx.api.editMessageReplyMarkup(
-					ctx.callbackQuery.message.chat.id,
-					ctx.callbackQuery.message.message_id,
-					{ reply_markup: { inline_keyboard: [] } },
-				);
-			} catch (err) {
-				log.warn("strip_keyboard_failed", { err: String(err) });
-			}
-		}
+		// Keyboard cleanup is centralized in `TelegramUI.<select|confirm|input>`'s
+		// finalize closures — they call editMessageText to reflect the choice,
+		// which also drops the inline keyboard as a side effect. This holds for
+		// every ompui path that reaches here, including the input cancel button.
 	});
 }

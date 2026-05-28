@@ -113,6 +113,36 @@ export class TelegramUI implements ExtensionUIContext {
 		return this.threadId !== undefined ? { message_thread_id: this.threadId } : {};
 	}
 
+	/**
+	 * Rewrite the carrier message to reflect the resolved choice, dropping
+	 * the inline keyboard in the process (editMessageText without
+	 * `reply_markup` strips it implicitly). On failure — most commonly the
+	 * 4096-char ceiling for free-text input answers, but also rate limits
+	 * and stale message_id — fall back to editMessageReplyMarkup so the
+	 * keyboard at least disappears and the user can't re-tap a stale button.
+	 *
+	 * Async / fire-and-forget: the resolve() caller doesn't need to wait
+	 * for the UI cleanup, and we don't surface errors to it.
+	 */
+	private editCarrier(messageId: number, text: string, scope: string): void {
+		// Telegram's message body cap is 4096 chars. Keep a margin so the
+		// "✅  → " framing always fits even if the title hugs the limit.
+		const TG_LIMIT = 4000;
+		const safe = text.length > TG_LIMIT ? `${text.slice(0, TG_LIMIT - 1)}…` : text;
+		void this.bot.api
+			.editMessageText(this.chatId, messageId, safe)
+			.catch(err => {
+				this.log.warn(`${scope}.edit_failed`, { err: String(err) });
+				return this.bot.api
+					.editMessageReplyMarkup(this.chatId, messageId, {
+						reply_markup: { inline_keyboard: [] },
+					})
+					.catch(err2 => {
+						this.log.warn(`${scope}.strip_keyboard_failed`, { err: String(err2) });
+					});
+			});
+	}
+
 	pending(): PendingUiRequest | undefined {
 		return this.current;
 	}
@@ -219,6 +249,11 @@ export class TelegramUI implements ExtensionUIContext {
 		});
 		this.log.info("select.posted", { req_id: requestId, message_id: msg.message_id });
 		return new Promise<string | undefined>(resolve => {
+			const finalize = (choice: string | undefined): void => {
+				const suffix = choice === undefined ? "⊘ cancelled" : `→ ${choice}`;
+				this.editCarrier(msg.message_id, `✅ ${title}  ${suffix}`, "select");
+				resolve(choice);
+			};
 			this.current = {
 				requestId,
 				kind: "select",
@@ -227,12 +262,12 @@ export class TelegramUI implements ExtensionUIContext {
 				resolve: raw => {
 					const v = String(raw);
 					this.log.info("select.resolving", { req_id: requestId, raw: v });
-					if (v === "cancel") return resolve(undefined);
+					if (v === "cancel") return finalize(undefined);
 					if (v.startsWith("i")) {
 						const idx = Number.parseInt(v.slice(1), 10);
-						return resolve(options[idx]);
+						return finalize(options[idx]);
 					}
-					resolve(undefined);
+					finalize(undefined);
 				},
 			};
 		});
@@ -260,6 +295,17 @@ export class TelegramUI implements ExtensionUIContext {
 		);
 		this.log.info("confirm.posted", { req_id: requestId, message_id: msg.message_id });
 		return new Promise<boolean>(resolve => {
+			const finalize = (choice: boolean | undefined): void => {
+				const suffix = choice === undefined
+					? "⊘ cancelled"
+					: `→ ${choice ? "yes" : "no"}`;
+				this.editCarrier(msg.message_id, `✅ ${text}  ${suffix}`, "confirm");
+				// Caller signature is boolean — cancellation/supersede degrades
+				// to `false` (the safe, status-quo answer). The edited carrier
+				// makes the distinction visible to the user even though the
+				// boolean cannot carry it.
+				resolve(choice ?? false);
+			};
 			this.current = {
 				requestId,
 				kind: "confirm",
@@ -267,7 +313,8 @@ export class TelegramUI implements ExtensionUIContext {
 				awaitsText: false,
 				resolve: raw => {
 					this.log.info("confirm.resolving", { req_id: requestId, raw: String(raw) });
-					resolve(String(raw) === "y");
+					if (raw === undefined) return finalize(undefined);
+					finalize(String(raw) === "y");
 				},
 			};
 		});
@@ -299,16 +346,21 @@ export class TelegramUI implements ExtensionUIContext {
 			},
 		);
 		return new Promise<string | undefined>(resolve => {
+			const finalize = (answer: string | undefined): void => {
+				const suffix = answer === undefined ? "⊘ cancelled" : `→ ${answer}`;
+				this.editCarrier(msg.message_id, `✅ ${title}  ${suffix}`, "input");
+				resolve(answer);
+			};
 			this.current = {
 				requestId,
 				kind: "input",
 				messageId: msg.message_id,
 				awaitsText: true,
 				resolve: raw => {
-					if (raw === undefined) return resolve(undefined);
+					if (raw === undefined) return finalize(undefined);
 					const v = String(raw);
-					if (v === "cancel") return resolve(undefined);
-					resolve(v);
+					if (v === "cancel") return finalize(undefined);
+					finalize(v);
 				},
 			};
 		});
