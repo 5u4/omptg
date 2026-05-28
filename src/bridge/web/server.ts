@@ -123,11 +123,11 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 		if (!summary) return undefined;
 		const cwdCheck = bridge.resolveCwd(summary.cwd);
 		if (!cwdCheck.ok) {
-			// Persisted cwd is no longer valid (allowlist changed,
-			// directory deleted, etc.). Don't silently fall back to the
-			// recorded string — that would bypass the allowlist or
-			// rehydrate into a missing path. Drop the ghost entry so
-			// the client sees session.removed on the next subscribe.
+			// Persisted cwd is no longer valid (directory deleted or
+			// replaced by a file). Don't silently fall back to the
+			// recorded string — that would rehydrate into a missing
+			// path. Drop the ghost entry so the client sees
+			// session.removed on the next subscribe.
 			log.warn("rehydrate.cwd_rejected", {
 				key: routeKey,
 				cwd: summary.cwd,

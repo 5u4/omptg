@@ -32,9 +32,8 @@ function makeBridge(): WebBridge {
 }
 
 beforeEach(() => {
-	// realpath so /var/folders → /private/var/folders on macOS;
-	// otherwise prefix-match against the canonicalized defaultCwd
-	// fails on what is in fact the same path.
+	// realpath so the canonicalized defaultCwd assertions don't flap
+	// on macOS where /var/folders is a symlink to /private/var/folders.
 	tempDir = realpathSync(mkdtempSync(join(tmpdir(), "omptg-web-")));
 	stateFile = join(tempDir, "web-sessions.json");
 });
@@ -181,30 +180,20 @@ describe("WebBridge", () => {
 		expect(b.listSessions()[0]?.title).toBe("generated");
 	});
 
-	it("validateCwd accepts defaultCwd and rejects unrelated paths", () => {
+	it("validateCwd accepts defaultCwd and any other absolute path", () => {
 		const b = makeBridge();
 		// defaultCwd === tempDir per makeBridge
 		expect(b.validateCwd(undefined)).toBe(tempDir);
 		expect(b.validateCwd(tempDir)).toBe(tempDir);
 		expect(b.validateCwd(join(tempDir, "sub"))).toBe(join(tempDir, "sub"));
-		expect(b.validateCwd("/etc")).toBeUndefined();
-	});
-
-	it("validateCwd honors allowedCwdPrefixes for paths outside defaultCwd", () => {
-		const extra = realpathSync(mkdtempSync(join(tmpdir(), "omptg-extra-")));
-		try {
-			const b = new WebBridge({
-				defaultCwd: tempDir,
-				stateFile,
-				allowedCwdPrefixes: [extra],
-			});
-			live.push(b);
-			expect(b.validateCwd(extra)).toBe(extra);
-			expect(b.validateCwd(join(extra, "deep"))).toBe(join(extra, "deep"));
-			expect(b.validateCwd("/usr")).toBeUndefined();
-		} finally {
-			rmSync(extra, { recursive: true, force: true });
-		}
+		// No more allowlist — any absolute path is accepted (the
+		// per-request resolveCwd still stat-checks for existence).
+		// Use tempdir-derived paths so the assertions don't depend on
+		// platform-specific realpath behavior (e.g. /etc → /private/etc
+		// on macOS).
+		const elsewhere = join(tempDir, "elsewhere");
+		expect(b.validateCwd(elsewhere)).toBe(elsewhere);
+		expect(b.validateCwd("/var/lib/nonexistent-omptg-test")).toBe("/var/lib/nonexistent-omptg-test");
 	});
 
 	it("ui.cancel reaches sibling subscribers when one client resolves a ui.request", () => {
@@ -237,7 +226,11 @@ describe("WebBridge", () => {
 		const b = makeBridge();
 		expect(b.resolveCwd(undefined)).toEqual({ ok: true, cwd: tempDir });
 		expect(b.resolveCwd(tempDir)).toEqual({ ok: true, cwd: tempDir });
-		expect(b.resolveCwd("/this/path/should/not/exist")).toEqual({ ok: false, reason: "denied" });
+		// Relative paths are the only "denied" case now that the
+		// allowlist is gone — everything else fails through missing /
+		// not-a-directory based on filesystem reality.
+		expect(b.resolveCwd("relative/path")).toEqual({ ok: false, reason: "denied" });
+		expect(b.resolveCwd("/this/path/should/not/exist")).toEqual({ ok: false, reason: "missing" });
 
 		// A path under defaultCwd that doesn't exist on disk → missing
 		const missing = join(tempDir, "nope");
@@ -295,22 +288,28 @@ describe("WebBridge", () => {
 	});
 
 	it("validateCwd rejects relative paths", () => {
-		// N2: resolvePath would have rebased "../foo" onto process.cwd()
-		// and potentially punched through the allowlist.
+		// resolvePath would otherwise rebase "../foo" onto process.cwd(),
+		// which is almost never what a malformed client meant.
 		const b = makeBridge();
 		expect(b.validateCwd("relative/path")).toBeUndefined();
 		expect(b.validateCwd("../escape")).toBeUndefined();
 		expect(b.validateCwd("./dot")).toBeUndefined();
 	});
 
-	it("validateCwd realpath-resolves to reject symlinks that escape the allowlist", () => {
-		// R5: <defaultCwd>/link -> /etc would otherwise prefix-match
-		// defaultCwd via its lexical path. realpath collapses it to
-		// /etc which fails the allowlist.
+	it("validateCwd realpath-canonicalizes symlinks", () => {
+		// Symlinks resolve to their target so two routes to the same
+		// directory collapse to a single session/folder entry. Target a
+		// second tempdir so we don't depend on /etc not being itself a
+		// symlink (it is, on macOS).
 		const b = makeBridge();
-		const link = join(tempDir, "escape");
-		symlinkSync("/etc", link);
-		expect(b.validateCwd(link)).toBeUndefined();
+		const target = realpathSync(mkdtempSync(join(tmpdir(), "omptg-target-")));
+		try {
+			const link = join(tempDir, "link-to-target");
+			symlinkSync(target, link);
+			expect(b.validateCwd(link)).toBe(target);
+		} finally {
+			rmSync(target, { recursive: true, force: true });
+		}
 	});
 
 	it("ws handshake: folder.list arrives before session.list", async () => {

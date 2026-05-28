@@ -18,7 +18,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve as resolvePath, sep } from "node:path";
+import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import type {
 	Bridge,
 	SessionRoute,
@@ -133,11 +133,6 @@ export interface WebBridgeOptions {
 	defaultCwd: string;
 	/** Override the persistence path (tests). */
 	stateFile?: string;
-	/** Extra cwd prefixes the server will accept from clients on
-	 *  `session.open` / `session.resume`. `defaultCwd` is always
-	 *  accepted; anything else must lie under one of these prefixes.
-	 *  Empty = `defaultCwd` only. */
-	allowedCwdPrefixes?: readonly string[];
 }
 
 export class WebBridge implements Bridge {
@@ -164,13 +159,11 @@ export class WebBridge implements Bridge {
 	/** Active subscribers. */
 	private readonly subscribers = new Set<Subscriber>();
 	private persistTimer: ReturnType<typeof setTimeout> | undefined;
-	private readonly allowedCwdPrefixes: readonly string[];
-	/** Realpath'd `defaultCwd` for prefix matching. A user can place
-	 *  the default at e.g. `~/.omptg` which itself may be a symlink;
-	 *  we want to compare against the resolved target so `/etc/...`
-	 *  reached via a symlinked subdirectory still gets rejected. */
+	/** Realpath'd `defaultCwd`. Used as the fallback for client cwd
+	 *  requests that omit one. Resolved via realpathSync so a default
+	 *  placed at a symlink (e.g. `~/.omptg → /var/data/omptg`) lands
+	 *  on the canonical target. */
 	private readonly canonicalDefaultCwd: string;
-	private readonly canonicalAllowedCwdPrefixes: readonly string[];
 
 	constructor(opts: WebBridgeOptions) {
 		this.defaultCwd = opts.defaultCwd;
@@ -180,9 +173,7 @@ export class WebBridge implements Bridge {
 		this.nextFolderId = loaded.nextFolderId;
 		for (const f of loaded.folders) this.folders.set(f.id, f);
 		for (const s of loaded.sessions) this.sessions.set(s.key, s);
-		this.allowedCwdPrefixes = opts.allowedCwdPrefixes ?? [];
 		this.canonicalDefaultCwd = canonicalize(opts.defaultCwd);
-		this.canonicalAllowedCwdPrefixes = (opts.allowedCwdPrefixes ?? []).map(canonicalize);
 	}
 
 	systemPromptAddendum(): string {
@@ -279,7 +270,7 @@ export class WebBridge implements Bridge {
 	}
 
 	/** Create a folder. Caller is responsible for cwd validation
-	 *  (same allowlist as session.open); the bridge stores whatever
+	 *  (same checks as session.open); the bridge stores whatever
 	 *  it's handed. cwd uniqueness across folders is NOT enforced. */
 	createFolder(input: { name: string; cwd: string }): { ok: true; folder: FolderSummary } | { ok: false; reason: "empty-name" | "name-too-long" } {
 		// `input` lands here straight from the wire; coerce defensively
@@ -468,21 +459,16 @@ export class WebBridge implements Bridge {
 		}
 	}
 
-	/** Validate a client-supplied cwd against `allowedCwdPrefixes`
-	 *  (defaultCwd is always allowed). Returns the resolved absolute
-	 *  path on success, undefined on rejection. */
+	/** Validate a client-supplied cwd. Empty / undefined falls back to
+	 *  `defaultCwd`. Any absolute path is accepted; relative paths are
+	 *  rejected so a malformed client can't accidentally rebase onto
+	 *  process.cwd(). The result is realpath-canonicalized so two
+	 *  routes to the same directory (symlink, trailing slash, etc.)
+	 *  collapse to a single session/folder entry. */
 	validateCwd(cwd: string | undefined): string | undefined {
-		if (!cwd) return this.defaultCwd;
-		// Reject relative paths outright: `resolve(cwd)` would silently
-		// rebase them onto process.cwd(), which is almost never what
-		// the client meant and can punch through the prefix allowlist.
+		if (!cwd) return this.canonicalDefaultCwd;
 		if (!isAbsolute(cwd)) return undefined;
-		const resolved = canonicalize(resolvePath(cwd));
-		if (isUnderPrefix(resolved, this.canonicalDefaultCwd)) return resolved;
-		for (const p of this.canonicalAllowedCwdPrefixes) {
-			if (resolved === p || isUnderPrefix(resolved, p)) return resolved;
-		}
-		return undefined;
+		return canonicalize(resolvePath(cwd));
 	}
 
 	/** Stricter form of validateCwd: also stat-checks the resolved path
@@ -569,19 +555,9 @@ export function compareFolders(a: { createdAt: number; id: string }, b: { create
 	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-/** Path-prefix check: true when `path` equals `prefix` or is nested
- *  beneath it (separator-aware so `/a/bcd` is NOT under `/a/b`). */
-function isUnderPrefix(path: string, prefix: string): boolean {
-	if (path === prefix) return true;
-	const withSep = prefix.endsWith(sep) ? prefix : prefix + sep;
-	return path.startsWith(withSep);
-}
-
-/** Best-effort realpath: resolves symlinks so a candidate path can't
- *  smuggle in `<defaultCwd>/link -> /etc` past the allowlist. Returns
- *  the input unchanged for paths that don't exist on disk (the
- *  allowlist check still applies; for an open() we'd reject via
- *  resolveCwd's `missing` reason). */
+/** Best-effort realpath: returns the canonical absolute path, or the
+ *  input unchanged when the path doesn't exist on disk yet (caller
+ *  surfaces a `missing` reason via resolveCwd's stat check). */
 function canonicalize(path: string): string {
 	try {
 		return realpathSync(path);
