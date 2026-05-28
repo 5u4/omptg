@@ -190,4 +190,18 @@ describe("splitMarkdownForTelegram", () => {
 		// No run of ≥2 backticks survives.
 		expect(md).not.toMatch(/``+/);
 	});
+
+	test("does NOT treat CommonMark-escaped backticks (`\\``) as span delimiters", () => {
+		// Regression: a backslash-escaped backtick is literal text per
+		// CommonMark and must not open or close a code span. Without
+		// the (?<!\\) lookbehind, input like \`literal\` was rewritten
+		// as a span and the closing escape became U+FF3C.
+		const src = "literal \\`foo\\` here";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		// The word "foo" survives without being wrapped in real
+		// backticks (telegramify will escape the source backticks).
+		expect(md).not.toMatch(/`foo`/);
+		// And no fullwidth backslash leaks into the escape sequence.
+		expect(md).not.toContain("\uFF3C");
+	});
 });

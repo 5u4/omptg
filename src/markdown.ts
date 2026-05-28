@@ -135,7 +135,22 @@ function neutralizeCodeSpans(src: string): string {
 	// Match a code span: a run of N backticks, then minimal content,
 	// then a run of the same length N (CommonMark rule). Non-greedy
 	// inner so we don't swallow across spans on the same line.
-	const SPAN_RE = /(`+)([\s\S]+?)\1/g;
+	//
+	// The opening (?<!(?<!\\)\\) lookbehind skips a delimiter preceded
+	// by an UNESCAPED `\` (CommonMark backslash-escaped backtick →
+	// literal text, not a delimiter). A `\\` in front IS an escaped
+	// backslash, so the backtick after it remains a real delimiter.
+	//
+	// NOTE: the SAME lookbehind on the CLOSING delimiter is unsafe.
+	// CommonMark says backslash escapes do NOT apply inside a code
+	// span (spec §6.1), so `` `\` `` is a span whose content is "\".
+	// Skipping its closing backtick because of the preceding `\` is
+	// wrong and is the exact bug this whole pass exists to fix
+	// (lone-`\` span eats its closer at the Telegram side). We
+	// therefore tolerate the rare cosmetic case where a paragraph
+	// `\` followed later by an unescaped `\`` is mis-grouped as a
+	// span; that's strictly better than reintroducing the 400.
+	const SPAN_RE = /(?<!(?<!\\)\\)(`+)([\s\S]+?)\1/g;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i]!;
 		if (FENCE_RE.test(line)) {
