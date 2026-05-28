@@ -8,6 +8,7 @@
     "build:web": "cd src/bridge/web/frontend && vite build",
     "dev:web": "cd src/bridge/web/frontend && vite",
     "smoke": "bun run scripts/smoke.ts",
+    "install-smoke": "bash scripts/install-smoke.sh",
     "typecheck": "tsc --noEmit && cd src/bridge/web/frontend && svelte-check --tsconfig ./tsconfig.json",
     "pm2:start": "pm2 start ecosystem.config.cjs",
     "pm2:restart": "pm2 restart omptg --update-env",

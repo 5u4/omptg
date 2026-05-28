@@ -24,6 +24,8 @@ Bridges a Telegram chat to OMP's `AgentSession` SDK in-process — no `omp --mod
 
 ## Quick start
 
+**Installing with an LLM agent?** Point it at [`install.md`](./install.md) — that file is written for autonomous execution (Mintlify [install.md](https://installmd.org/) format) and front-loads everything that doesn't need a human, leaving only the Telegram-bot creation step for you.
+
 **Prerequisites:** [Bun](https://bun.sh) ≥ 1.3. For voice input also [`ffmpeg`](https://ffmpeg.org) and [`uv`](https://github.com/astral-sh/uv) (only consulted the first time a voice message arrives — skip if you won't speak to the bot).
 
 **1. Create a bot.** Talk to [@BotFather](https://t.me/botfather), send `/newbot`, copy the token.
