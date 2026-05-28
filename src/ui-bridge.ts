@@ -113,6 +113,36 @@ export class TelegramUI implements ExtensionUIContext {
 		return this.threadId !== undefined ? { message_thread_id: this.threadId } : {};
 	}
 
+	/**
+	 * Rewrite the carrier message to reflect the resolved choice, dropping
+	 * the inline keyboard in the process (editMessageText without
+	 * `reply_markup` strips it implicitly). On failure — most commonly the
+	 * 4096-char ceiling for free-text input answers, but also rate limits
+	 * and stale message_id — fall back to editMessageReplyMarkup so the
+	 * keyboard at least disappears and the user can't re-tap a stale button.
+	 *
+	 * Async / fire-and-forget: the resolve() caller doesn't need to wait
+	 * for the UI cleanup, and we don't surface errors to it.
+	 */
+	private editCarrier(messageId: number, text: string, scope: string): void {
+		// Telegram's message body cap is 4096 chars. Keep a margin so the
+		// "✅  → " framing always fits even if the title hugs the limit.
+		const TG_LIMIT = 4000;
+		const safe = text.length > TG_LIMIT ? `${text.slice(0, TG_LIMIT - 1)}…` : text;
+		void this.bot.api
+			.editMessageText(this.chatId, messageId, safe)
+			.catch(err => {
+				this.log.warn(`${scope}.edit_failed`, { err: String(err) });
+				return this.bot.api
+					.editMessageReplyMarkup(this.chatId, messageId, {
+						reply_markup: { inline_keyboard: [] },
+					})
+					.catch(err2 => {
+						this.log.warn(`${scope}.strip_keyboard_failed`, { err: String(err2) });
+					});
+			});
+	}
+
 	pending(): PendingUiRequest | undefined {
 		return this.current;
 	}
@@ -221,9 +251,7 @@ export class TelegramUI implements ExtensionUIContext {
 		return new Promise<string | undefined>(resolve => {
 			const finalize = (choice: string | undefined): void => {
 				const suffix = choice === undefined ? "⊘ cancelled" : `→ ${choice}`;
-				void this.bot.api
-					.editMessageText(this.chatId, msg.message_id, `✅ ${title}  ${suffix}`)
-					.catch(err => this.log.warn("select.edit_failed", { err: String(err) }));
+				this.editCarrier(msg.message_id, `✅ ${title}  ${suffix}`, "select");
 				resolve(choice);
 			};
 			this.current = {
@@ -271,9 +299,7 @@ export class TelegramUI implements ExtensionUIContext {
 				const suffix = choice === undefined
 					? "⊘ cancelled"
 					: `→ ${choice ? "yes" : "no"}`;
-				void this.bot.api
-					.editMessageText(this.chatId, msg.message_id, `✅ ${text}  ${suffix}`)
-					.catch(err => this.log.warn("confirm.edit_failed", { err: String(err) }));
+				this.editCarrier(msg.message_id, `✅ ${text}  ${suffix}`, "confirm");
 				// Caller signature is boolean — cancellation/supersede degrades
 				// to `false` (the safe, status-quo answer). The edited carrier
 				// makes the distinction visible to the user even though the
@@ -322,9 +348,7 @@ export class TelegramUI implements ExtensionUIContext {
 		return new Promise<string | undefined>(resolve => {
 			const finalize = (answer: string | undefined): void => {
 				const suffix = answer === undefined ? "⊘ cancelled" : `→ ${answer}`;
-				void this.bot.api
-					.editMessageText(this.chatId, msg.message_id, `✅ ${title}  ${suffix}`)
-					.catch(err => this.log.warn("input.edit_failed", { err: String(err) }));
+				this.editCarrier(msg.message_id, `✅ ${title}  ${suffix}`, "input");
 				resolve(answer);
 			};
 			this.current = {

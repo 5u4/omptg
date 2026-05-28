@@ -31,29 +31,35 @@ describe("parseCallback", () => {
 
 /** Stub Bot: records each sendMessage / editMessageText call so tests can
  *  assert on previews and on the post-resolution feedback edit. */
-function stubBot(): {
+function stubBot(opts: { editFails?: boolean } = {}): {
 	bot: Bot;
 	nextMessageId: () => number;
 	sent: { text: string; opts: unknown }[];
 	edits: { messageId: number; text: string }[];
+	markupEdits: { messageId: number }[];
 } {
 	let counter = 100;
 	const sent: { text: string; opts: unknown }[] = [];
 	const edits: { messageId: number; text: string }[] = [];
+	const markupEdits: { messageId: number }[] = [];
 	const bot = {
 		api: {
-			sendMessage: async (_chatId: number, text: string, opts?: unknown) => {
-				sent.push({ text, opts });
+			sendMessage: async (_chatId: number, text: string, opts2?: unknown) => {
+				sent.push({ text, opts: opts2 });
 				return { message_id: ++counter };
 			},
 			editMessageText: async (_chatId: number, messageId: number, text: string) => {
+				if (opts.editFails) throw new Error("Bad Request: message too long");
 				edits.push({ messageId, text });
 				return undefined;
 			},
-			editMessageReplyMarkup: async () => undefined,
+			editMessageReplyMarkup: async (_chatId: number, messageId: number) => {
+				markupEdits.push({ messageId });
+				return undefined;
+			},
 		},
 	} as unknown as Bot;
-	return { bot, nextMessageId: () => counter, sent, edits };
+	return { bot, nextMessageId: () => counter, sent, edits, markupEdits };
 }
 
 describe("TelegramUI.resolve", () => {
@@ -328,5 +334,40 @@ describe("TelegramUI choice reflection", () => {
 		expect(edits[0]?.text).toContain(longCjk);
 		// Preview text in sent[0] still present (we never edited it).
 		expect(sent[0]?.text).toContain(longCjk);
+	});
+
+});
+
+describe("TelegramUI editCarrier resilience", () => {
+	test("over-limit input answer is truncated to fit Telegram's 4096 cap", async () => {
+		const { bot, edits } = stubBot();
+		const ui = new TelegramUI(bot, 1);
+		const p = ui.input("title");
+		await Promise.resolve();
+		await Promise.resolve();
+		const huge = "x".repeat(5000);
+		ui.resolve({ kind: "text", text: huge });
+		expect(await p).toBe(huge); // caller still sees full text
+		expect(edits).toHaveLength(1);
+		// Carrier edit fits under Telegram's 4096 ceiling.
+		expect(edits[0]!.text.length).toBeLessThanOrEqual(4096);
+		expect(edits[0]!.text.endsWith("…")).toBe(true);
+	});
+
+	test("when editMessageText fails, fall back to stripping the keyboard", async () => {
+		const { bot, edits, markupEdits } = stubBot({ editFails: true });
+		const ui = new TelegramUI(bot, 1);
+		const p = ui.select("pick", ["a"]);
+		await Promise.resolve();
+		await Promise.resolve();
+		const pending = ui.pending()!;
+		ui.resolve({ kind: "callback", requestId: pending.requestId, value: "i0" });
+		expect(await p).toBe("a");
+		// Allow the fire-and-forget edit chain to settle.
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(edits).toHaveLength(0);
+		expect(markupEdits).toHaveLength(1);
+		expect(markupEdits[0]?.messageId).toBe(pending.messageId);
 	});
 });
