@@ -136,21 +136,21 @@ function neutralizeCodeSpans(src: string): string {
 	// then a run of the same length N (CommonMark rule). Non-greedy
 	// inner so we don't swallow across spans on the same line.
 	//
-	// The opening (?<!(?<!\\)\\) lookbehind skips a delimiter preceded
-	// by an UNESCAPED `\` (CommonMark backslash-escaped backtick →
-	// literal text, not a delimiter). A `\\` in front IS an escaped
-	// backslash, so the backtick after it remains a real delimiter.
+	// Opening delimiter is skipped when preceded by an ODD number of
+	// consecutive backslashes (CommonMark: the final `\` escapes the
+	// backtick, making it literal text). Even count means the
+	// backslashes pair off as escaped backslashes and the backtick
+	// remains a real delimiter. The match callback counts the actual
+	// run length because lookbehind only sees a fixed window and would
+	// misclassify runs of length ≥3.
 	//
-	// NOTE: the SAME lookbehind on the CLOSING delimiter is unsafe.
-	// CommonMark says backslash escapes do NOT apply inside a code
-	// span (spec §6.1), so `` `\` `` is a span whose content is "\".
-	// Skipping its closing backtick because of the preceding `\` is
-	// wrong and is the exact bug this whole pass exists to fix
-	// (lone-`\` span eats its closer at the Telegram side). We
-	// therefore tolerate the rare cosmetic case where a paragraph
-	// `\` followed later by an unescaped `\`` is mis-grouped as a
-	// span; that's strictly better than reintroducing the 400.
-	const SPAN_RE = /(?<!(?<!\\)\\)(`+)([\s\S]+?)\1/g;
+	// NOTE: closing delimiter is NOT guarded the same way. CommonMark
+	// §6.1 says backslash escapes do not apply inside a code span, so
+	// `` `\` `` is a span whose content is "\". Skipping its closer
+	// because of the preceding `\` would reintroduce the exact 400
+	// this pass exists to fix (lone-`\` span eats its closer at the
+	// Telegram side).
+	const SPAN_RE = /(`+)([\s\S]+?)\1/g;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i]!;
 		if (FENCE_RE.test(line)) {
@@ -158,8 +158,14 @@ function neutralizeCodeSpans(src: string): string {
 			continue;
 		}
 		if (inFence) continue;
-		lines[i] = line.replace(SPAN_RE, (_, ticks: string, inner: string) => {
+		lines[i] = line.replace(SPAN_RE, (match, ticks: string, inner: string, offset: number) => {
 			let flat = inner;
+			// Count the run of consecutive `\` immediately before the
+			// opening delimiter. Odd → the final `\` escapes the
+			// backtick → not a real span, leave the source unchanged.
+			let bs = 0;
+			while (offset - bs - 1 >= 0 && line.charCodeAt(offset - bs - 1) === 0x5c) bs++;
+			if (bs % 2 === 1) return match;
 			// If the opening run was ≥2 ticks, the content may itself
 			// contain single backticks (that's why GFM chose a longer
 			// run). Strip them — emphasis lost, message survives.

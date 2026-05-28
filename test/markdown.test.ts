@@ -204,4 +204,16 @@ describe("splitMarkdownForTelegram", () => {
 		// And no fullwidth backslash leaks into the escape sequence.
 		expect(md).not.toContain("\uFF3C");
 	});
+
+	test("correctly classifies 3-backslash run before backtick as escaped", () => {
+		// Regression for the fixed-window lookbehind: 3 (or any odd N ≥ 3)
+		// consecutive backslashes before a backtick still escape it per
+		// CommonMark (pairs become escaped backslashes, the last `\`
+		// escapes the backtick). The match callback now counts the full
+		// run instead of peeking only 2 chars back.
+		const src = "literal \\\\\\`foo\\\\\\` here";
+		const md = splitMarkdownForTelegram(src)[0]!.md;
+		expect(md).not.toMatch(/`foo`/);
+		expect(md).not.toContain("\uFF3C");
+	});
 });
