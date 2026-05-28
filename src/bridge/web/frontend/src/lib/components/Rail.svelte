@@ -19,10 +19,11 @@ const grouped = $derived(store.groupedSessions);
 
 /** Best-effort default cwd for the dialogs. The server doesn't push
  *  its `defaultCwd` over the wire, so we crib whatever cwd the user
- *  most recently saw — first folder's cwd, else first session's cwd,
- *  else empty (forces the user to type). */
+ *  most recently saw — newest folder's cwd, else top session's cwd
+ *  (sessions are kept sorted by `lastActivity` descending), else
+ *  empty (forces the user to type). */
 const dialogDefaultCwd = $derived(
-	store.folders[0]?.cwd
+	store.folders[store.folders.length - 1]?.cwd
 	?? store.sessions[0]?.cwd
 	?? "",
 );

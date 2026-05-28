@@ -267,7 +267,7 @@ export class WebBridge implements Bridge {
 	 *  when two folders land in the same millisecond. */
 	listFolders(): FolderSummary[] {
 		return [...this.folders.values()]
-			.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1))
+			.sort(compareFolders)
 			.map(f => ({ id: f.id, name: f.name, cwd: f.cwd, createdAt: f.createdAt }));
 	}
 
@@ -553,6 +553,20 @@ function reconcileNext<T>(persisted: unknown, items: readonly T[], idOf: (item: 
 		if (Number.isFinite(n) && n + 1 > max) max = n + 1;
 	}
 	return max;
+}
+
+/** Stable folder sort: ascending by `createdAt`, ties broken by the
+ *  numeric suffix of `id`. Naive string compare would put `f:10`
+ *  before `f:2`, which only bites when two folders land in the same
+ *  millisecond but visibly diverges from the monotonic mint order. */
+export function compareFolders(a: { createdAt: number; id: string }, b: { createdAt: number; id: string }): number {
+	if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+	const an = Number(a.id.split(":")[1]);
+	const bn = Number(b.id.split(":")[1]);
+	if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+	// Fallback for non-`f:N` ids (shouldn't happen, but keep the
+	// comparator total so sort is deterministic).
+	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
 /** Path-prefix check: true when `path` equals `prefix` or is nested

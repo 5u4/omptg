@@ -117,6 +117,19 @@ describe("WebBridge folders", () => {
 		expect(list.map(f => f.id)).toEqual(["f:1", "f:2"]);
 	});
 
+	it("listFolders tiebreak is numeric (f:10 after f:2, not lex)", () => {
+		const b = makeBridge();
+		// Mint 10 folders in quick succession. Some pairs will land in
+		// the same millisecond; lex compare would sort `f:10` between
+		// `f:1` and `f:2`. Verify numeric ordering instead.
+		for (let i = 0; i < 10; i++) {
+			const r = b.createFolder({ name: `n${i}`, cwd: tempDir });
+			if (!r.ok) throw new Error("setup");
+		}
+		const ids = b.listFolders().map(f => f.id);
+		expect(ids).toEqual(["f:1", "f:2", "f:3", "f:4", "f:5", "f:6", "f:7", "f:8", "f:9", "f:10"]);
+	});
+
 	it("folderCwd returns the recorded cwd or undefined", () => {
 		const b = makeBridge();
 		const made = b.createFolder({ name: "x", cwd: tempDir });

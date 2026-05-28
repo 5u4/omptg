@@ -46,8 +46,12 @@ module.exports = {
 			merge_logs: true,
 			log_date_format: "YYYY-MM-DD HH:mm:ss",
 
+			// Make user-local installs (uv, pipx, cargo) visible to spawned
+			// subprocesses. PM2 inherits the daemon's PATH, which on a fresh
+			// login shell usually omits ~/.local/bin.
 			env: {
 				NODE_ENV: "production",
+				PATH: `${process.env.HOME}/.local/bin:${process.env.HOME}/.cargo/bin:${process.env.PATH}`,
 			},
 		},
 	],

@@ -381,8 +381,14 @@ function handle(msg: ServerMsg): void {
 			store.folders = [...msg.folders];
 			break;
 		case "folder.created":
-			store.folders = [...store.folders, msg.folder]
-				.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
+			// Ties broken by the numeric suffix of `id` so `f:10` doesn't
+			// jump ahead of `f:2` when two folders land in the same ms.
+			store.folders = [...store.folders, msg.folder].sort((a, b) => {
+				if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+				const an = Number(a.id.split(":")[1]);
+				const bn = Number(b.id.split(":")[1]);
+				return Number.isFinite(an) && Number.isFinite(bn) ? an - bn : 0;
+			});
 			break;
 		case "folder.updated":
 			store.folders = store.folders.map(f =>
