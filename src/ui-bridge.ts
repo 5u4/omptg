@@ -219,6 +219,13 @@ export class TelegramUI implements ExtensionUIContext {
 		});
 		this.log.info("select.posted", { req_id: requestId, message_id: msg.message_id });
 		return new Promise<string | undefined>(resolve => {
+			const finalize = (choice: string | undefined): void => {
+				const suffix = choice === undefined ? "⊘ cancelled" : `→ ${choice}`;
+				void this.bot.api
+					.editMessageText(this.chatId, msg.message_id, `✅ ${title}  ${suffix}`)
+					.catch(err => this.log.warn("select.edit_failed", { err: String(err) }));
+				resolve(choice);
+			};
 			this.current = {
 				requestId,
 				kind: "select",
@@ -227,12 +234,12 @@ export class TelegramUI implements ExtensionUIContext {
 				resolve: raw => {
 					const v = String(raw);
 					this.log.info("select.resolving", { req_id: requestId, raw: v });
-					if (v === "cancel") return resolve(undefined);
+					if (v === "cancel") return finalize(undefined);
 					if (v.startsWith("i")) {
 						const idx = Number.parseInt(v.slice(1), 10);
-						return resolve(options[idx]);
+						return finalize(options[idx]);
 					}
-					resolve(undefined);
+					finalize(undefined);
 				},
 			};
 		});
@@ -260,6 +267,19 @@ export class TelegramUI implements ExtensionUIContext {
 		);
 		this.log.info("confirm.posted", { req_id: requestId, message_id: msg.message_id });
 		return new Promise<boolean>(resolve => {
+			const finalize = (choice: boolean | undefined): void => {
+				const suffix = choice === undefined
+					? "⊘ cancelled"
+					: `→ ${choice ? "yes" : "no"}`;
+				void this.bot.api
+					.editMessageText(this.chatId, msg.message_id, `✅ ${text}  ${suffix}`)
+					.catch(err => this.log.warn("confirm.edit_failed", { err: String(err) }));
+				// Caller signature is boolean — cancellation/supersede degrades
+				// to `false` (the safe, status-quo answer). The edited carrier
+				// makes the distinction visible to the user even though the
+				// boolean cannot carry it.
+				resolve(choice ?? false);
+			};
 			this.current = {
 				requestId,
 				kind: "confirm",
@@ -267,7 +287,8 @@ export class TelegramUI implements ExtensionUIContext {
 				awaitsText: false,
 				resolve: raw => {
 					this.log.info("confirm.resolving", { req_id: requestId, raw: String(raw) });
-					resolve(String(raw) === "y");
+					if (raw === undefined) return finalize(undefined);
+					finalize(String(raw) === "y");
 				},
 			};
 		});
@@ -299,16 +320,23 @@ export class TelegramUI implements ExtensionUIContext {
 			},
 		);
 		return new Promise<string | undefined>(resolve => {
+			const finalize = (answer: string | undefined): void => {
+				const suffix = answer === undefined ? "⊘ cancelled" : `→ ${answer}`;
+				void this.bot.api
+					.editMessageText(this.chatId, msg.message_id, `✅ ${title}  ${suffix}`)
+					.catch(err => this.log.warn("input.edit_failed", { err: String(err) }));
+				resolve(answer);
+			};
 			this.current = {
 				requestId,
 				kind: "input",
 				messageId: msg.message_id,
 				awaitsText: true,
 				resolve: raw => {
-					if (raw === undefined) return resolve(undefined);
+					if (raw === undefined) return finalize(undefined);
 					const v = String(raw);
-					if (v === "cancel") return resolve(undefined);
-					resolve(v);
+					if (v === "cancel") return finalize(undefined);
+					finalize(v);
 				},
 			};
 		});
