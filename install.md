@@ -2,7 +2,7 @@
 
 > Telegram bridge for the OMP coding agent — one Bun process, one AgentSession per chat.
 
-I want you to install omptg for me. Execute all the steps below autonomously. Do every non-interactive step yourself without pausing for confirmation. Only stop at the **HUMAN HANDOFF** section at the end — at that point, print the checklist to the user and wait for them to come back with the values.
+I want you to install omptg for me. Walk every step below in order; for each shell command, confirm it matches what's in this file (no extra flags, no extra commands), then run it without further confirmation. If a command produces unexpected output or non-zero exit, stop and report — do not improvise a fix. Only stop voluntarily at the **HUMAN HANDOFF** section at the end and wait for the user there.
 
 OBJECTIVE: Get an omptg checkout on disk with all dependencies installed, the OMP CLI resolvable, a populated `.env` template, and a one-command boot recipe — so the only thing left for the human is creating the Telegram bot and configuring OMP's LLM provider.
 
@@ -10,16 +10,15 @@ DONE WHEN: All of the following are true:
 1. `bun --version` prints `1.3.0` or higher.
 2. The repo is checked out and `bun install` completed with exit 0.
 3. `bunx tsc --noEmit` (run from the repo root) exits 0.
-4. `bunx --bun @oh-my-pi/pi-coding-agent --help` exits 0 (OMP CLI resolves; the `~/.omp/agent/` tree is created lazily by OMP on its first real session, not here).
-5. `.env` exists in the repo root, contains every key from `.env.example`, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_CHATS` are present as empty placeholders ready for the human to fill in.
-6. You have printed the **HUMAN HANDOFF** checklist verbatim and are waiting for the user.
+4. `.env` exists in the repo root, contains every key from `.env.example`, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_CHATS` are present as empty placeholders ready for the human to fill in.
+5. You have printed the **HUMAN HANDOFF** checklist verbatim and are waiting for the user.
 
 ## TODO
 
 - [ ] Verify Bun ≥ 1.3 (install it if missing)
 - [ ] Clone the repo (skip if already inside it)
 - [ ] `bun install`
-- [ ] Warm the OMP CLI (`bunx @oh-my-pi/pi-coding-agent --help`)
+- [ ] Confirm the OMP CLI resolves (`bunx omp --help`)
 - [ ] Create `.env` from `.env.example` with placeholders ready
 - [ ] Typecheck to confirm the tree is sound
 - [ ] Print the **HUMAN HANDOFF** checklist and stop
@@ -61,16 +60,16 @@ bun install
 
 This pulls `grammy`, `@oh-my-pi/pi-coding-agent`, and the rest. Frontend deps under `src/bridge/web/frontend` come along — ignore them, the web UI is not part of this install path.
 
-## Step 4 — Warm OMP
+## Step 4 — Confirm OMP resolves
 
 The agent SDK is pulled in by `bun install`; OMP itself only writes `~/.omp/agent/` the first time a real session runs (which happens when the human DMs the bot, not now). Just confirm the CLI resolves and the `~/.omp/` root gets created:
 
 ```bash
-bunx --bun @oh-my-pi/pi-coding-agent --help >/dev/null
+bunx --bun omp --help >/dev/null
 test -d ~/.omp && echo "OMP reachable"
 ```
 
-Provider credentials (OpenAI / Anthropic / GitHub Copilot / etc.) are OMP's concern, not omptg's. They are **not** part of omptg's `.env`. The human handles them in HUMAN HANDOFF step C by running `omp` interactively once. Do **not** invent keys or pre-populate `~/.omp/agent/config.yml`.
+This is a sanity check that `node_modules/.bin/omp` was created by Step 3 — it doesn't install or configure anything OMP-side. Provider credentials (OpenAI / Anthropic / GitHub Copilot / etc.) are OMP's concern, not omptg's; they are **not** part of omptg's `.env`. The human handles them in HUMAN HANDOFF step C. Do **not** invent keys or pre-populate `~/.omp/agent/config.yml`.
 
 ## Step 5 — Create `.env`
 
