@@ -416,6 +416,10 @@ export function renameFolder(id: string, name: string): void {
 	send({ type: "folder.rename", id, name });
 }
 
+export function renameSession(key: string, title: string): void {
+	send({ type: "session.rename", key, title });
+}
+
 export function sendPrompt(key: string, text: string): void {
 	const trimmed = text.trim();
 	if (!trimmed) return;
