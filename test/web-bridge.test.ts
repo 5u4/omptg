@@ -386,4 +386,49 @@ describe("WebBridge", () => {
 			await running.stop();
 		}
 	});
+
+	it("ws session.rename: validates inputs and rejects unknown keys", async () => {
+		// Real renames need a live ChatSession (omp jsonl + setTitle),
+		// which isn't worth stubbing in a unit test. The wire-level
+		// guards (missing key / empty title / too-long title / unknown
+		// session) are pure and worth pinning.
+		const b = makeBridge();
+		const running: RunningServer = startWebServer({ host: "127.0.0.1", port: 0, bridge: b });
+		try {
+			const url = running.server.url;
+			const ws = new WebSocket(`ws://${url.hostname}:${url.port}/ws`);
+			const errors: Array<{ message: string }> = [];
+			ws.addEventListener("message", ev => {
+				const msg = JSON.parse(String(ev.data)) as ServerMsg;
+				if (msg.type === "error") errors.push({ message: msg.message });
+			});
+			await new Promise<void>((resolve, reject) => {
+				ws.addEventListener("open", () => resolve());
+				ws.addEventListener("error", () => reject(new Error("ws error")));
+			});
+
+			// Empty key
+			ws.send(JSON.stringify({ type: "session.rename", key: "", title: "x" }));
+			// Empty title (after trim)
+			ws.send(JSON.stringify({ type: "session.rename", key: "web:1", title: "   " }));
+			// 81-char title
+			ws.send(JSON.stringify({ type: "session.rename", key: "web:1", title: "a".repeat(81) }));
+			// Unknown session
+			ws.send(JSON.stringify({ type: "session.rename", key: "web:9999", title: "hello" }));
+
+			const deadline = Date.now() + 2000;
+			while (errors.length < 4 && Date.now() < deadline) {
+				await new Promise(r => setTimeout(r, 10));
+			}
+			ws.close();
+
+			expect(errors).toHaveLength(4);
+			expect(errors[0]!.message).toContain("key is required");
+			expect(errors[1]!.message).toContain("title is required");
+			expect(errors[2]!.message).toContain("too long");
+			expect(errors[3]!.message).toContain("unknown session");
+		} finally {
+			await running.stop();
+		}
+	});
 });

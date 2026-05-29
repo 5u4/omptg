@@ -24,7 +24,7 @@ function submitRename(title: string): void {
 		</div>
 		<button
 			type="button"
-			class="rounded p-0.5 text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground group-hover:opacity-100"
+			class="rounded p-0.5 text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100"
 			title="Rename session"
 			aria-label="Rename session"
 			onclick={() => (renaming = true)}
