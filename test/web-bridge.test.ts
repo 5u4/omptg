@@ -180,6 +180,23 @@ describe("WebBridge", () => {
 		expect(b.listSessions()[0]?.title).toBe("generated");
 	});
 
+	it("patchSession with {touch: false} preserves lastActivity", async () => {
+		// A pure rename must not float the session to the top of the
+		// rail — otherwise sort order silently changes on the next
+		// reload purely because the user edited a title.
+		const b = makeBridge();
+		const r = b.mintRoute();
+		b.open(r);
+		b.patchSession(r.key, { title: "first" });
+		const before = b.listSessions()[0]!.lastActivity;
+		// Sleep a tick so a touched patch would observably bump.
+		await new Promise(resolve => setTimeout(resolve, 5));
+		b.patchSession(r.key, { title: "renamed" }, { touch: false });
+		const after = b.listSessions()[0]!;
+		expect(after.title).toBe("renamed");
+		expect(after.lastActivity).toBe(before);
+	});
+
 	it("validateCwd accepts defaultCwd and any other absolute path", () => {
 		const b = makeBridge();
 		// defaultCwd === tempDir per makeBridge

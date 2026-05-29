@@ -379,7 +379,7 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				// session.updated so the rail/header re-render. Use the
 				// chat's view of sessionName so we agree with what
 				// omp persisted on disk.
-				bridge.patchSession(msg.key, { title: chat.sessionName ?? trimmed });
+				bridge.patchSession(msg.key, { title: chat.sessionName ?? trimmed }, { touch: false });
 				break;
 			}
 			default:

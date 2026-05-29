@@ -302,8 +302,11 @@ export class WebBridge implements Bridge {
 	}
 
 	/** Apply a metadata patch — called by the server when ChatSession
-	 *  fires `session.attached` / title generation / model change. */
-	patchSession(key: string, patch: Partial<PersistedSession>): void {
+	 *  fires `session.attached` / title generation / model change.
+	 *  `touch` (default true) bumps `lastActivity` so the session
+	 *  floats to the top of the rail; pass `false` for pure metadata
+	 *  edits (e.g. user rename) that shouldn't change sort order. */
+	patchSession(key: string, patch: Partial<PersistedSession>, opts: { touch?: boolean } = {}): void {
 		const cur = this.sessions.get(key);
 		if (!cur) return;
 		// Filter empty-string `title` so a post-turn patch that runs
@@ -311,7 +314,8 @@ export class WebBridge implements Bridge {
 		// existing title with "".
 		const clean: Partial<PersistedSession> = { ...patch };
 		if (clean.title === "") delete clean.title;
-		Object.assign(cur, clean, { lastActivity: Date.now() });
+		const touch = opts.touch ?? true;
+		Object.assign(cur, clean, touch ? { lastActivity: Date.now() } : {});
 		this.schedulePersist();
 		this.broadcast({ type: "session.updated", key, patch: {
 			title: cur.title,
