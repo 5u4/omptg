@@ -118,6 +118,7 @@ export type ClientMsg =
 	| { type: "session.resume"; sessionFile: string; cwd?: string }
 	| { type: "folder.create"; name: string; cwd: string }
 	| { type: "folder.rename"; id: string; name: string }
+	| { type: "session.rename"; key: string; title: string }
 	/** Send a user turn. */
 	| { type: "session.send"; key: string; text: string }
 	/** Abort the in-flight turn. */

@@ -351,6 +351,37 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				}
 				break;
 			}
+			case "session.rename": {
+				if (typeof msg.key !== "string" || !msg.key) {
+					state.send({ type: "error", message: "session.rename: key is required" });
+					return;
+				}
+				const trimmed = typeof msg.title === "string" ? msg.title.trim() : "";
+				if (!trimmed) {
+					state.send({ type: "error", message: "session.rename: title is required" });
+					return;
+				}
+				if (trimmed.length > 80) {
+					state.send({ type: "error", message: "session.rename: title too long (max 80)" });
+					return;
+				}
+				const chat = await getOrRehydrate(msg.key);
+				if (!chat) {
+					state.send({ type: "error", message: `unknown session ${msg.key}` });
+					return;
+				}
+				const ok = await chat.setTitle(trimmed);
+				if (!ok) {
+					state.send({ type: "error", message: "session.rename: setTitle rejected (no active session or title rejected by omp)" });
+					return;
+				}
+				// Mirror the new title into the web metadata + broadcast
+				// session.updated so the rail/header re-render. Use the
+				// chat's view of sessionName so we agree with what
+				// omp persisted on disk.
+				bridge.patchSession(msg.key, { title: chat.sessionName ?? trimmed }, { touch: false });
+				break;
+			}
 			default:
 				state.send({ type: "error", message: `unknown type: ${(msg as { type?: string }).type}` });
 		}
