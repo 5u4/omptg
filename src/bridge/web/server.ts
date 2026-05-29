@@ -372,7 +372,7 @@ export function startWebServer(opts: WebServerOptions): RunningServer {
 				}
 				const ok = await chat.setTitle(trimmed);
 				if (!ok) {
-					state.send({ type: "error", message: "session.rename: setTitle rejected (no active session?)" });
+					state.send({ type: "error", message: "session.rename: setTitle rejected (no active session or title rejected by omp)" });
 					return;
 				}
 				// Mirror the new title into the web metadata + broadcast
