@@ -647,6 +647,7 @@ export class ChatSession {
 			progress.currentToolArgs,
 			progress.lastIntent,
 			progress.toolCount,
+			progress.resolvedModel,
 		);
 		const key = `${active.toolCallId}#${index}`;
 		if (!active.keys.includes(key)) active.keys.push(key);

@@ -171,6 +171,11 @@ export function renderSubagentProgress(
 	currentToolArgs: string | undefined,
 	lastIntent: string | undefined,
 	toolCount: number,
+	/** Resolved model display string (`<provider>/<id>[:<thinkingLevel>]`),
+	 *  populated by the SDK from 15.6+. Surfaced as a trailing badge so the
+	 *  user can tell which model each subagent slot is actually running on
+	 *  — e.g. when `modelOverride` was set or routing picked a fallback. */
+	resolvedModel: string | undefined,
 ): string {
 	const label = description
 		? ` "${truncate(description, SUBAGENT_LABEL_MAX)}"`
@@ -183,5 +188,6 @@ export function renderSubagentProgress(
 		action = `⏳ ${truncate(lastIntent ?? "idle", 40)}`;
 	}
 	const counter = toolCount > 0 ? `  · ${toolCount} tool${toolCount === 1 ? "" : "s"}` : "";
-	return `  └ [${index}] ${agent}${label}  ${action}${counter}`;
+	const model = resolvedModel ? `  · ${truncate(resolvedModel, 30)}` : "";
+	return `  └ [${index}] ${agent}${label}  ${action}${counter}${model}`;
 }
