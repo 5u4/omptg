@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderToolEnd, renderToolStart } from "../src/tool-render.ts";
+import { renderSubagentProgress, renderToolEnd, renderToolStart } from "../src/tool-render.ts";
 
 describe("renderToolStart", () => {
 	test("read uses basename-free path verbatim", () => {
@@ -125,5 +125,41 @@ describe("renderToolEnd", () => {
 		const out = renderToolEnd("bash", { content: [{ type: "text", text }] }, true);
 		expect(out.endsWith("…")).toBe(true);
 		expect(out.length).toBeLessThanOrEqual("❌ bash failed: ".length + 100);
+	});
+});
+
+describe("renderSubagentProgress", () => {
+	test("renders model badge after tool counter", () => {
+		const line = renderSubagentProgress(
+			0,
+			"explore",
+			"map auth flow",
+			"read",
+			"src/auth.ts",
+			undefined,
+			3,
+			"anthropic/claude-sonnet-4",
+		);
+		expect(line).toBe(
+			'  └ [0] explore "map auth flow"  🔧 read src/auth.ts  · 3 tools  · anthropic/claude-sonnet-4',
+		);
+	});
+
+	test("omits badge when resolvedModel is undefined", () => {
+		const line = renderSubagentProgress(1, "task", undefined, "bash", "ls", undefined, 1, undefined);
+		expect(line).toBe("  └ [1] task  🔧 bash ls  · 1 tool");
+	});
+
+	test("renders model badge with zero toolCount and idle action", () => {
+		const line = renderSubagentProgress(2, "explore", "lookup", undefined, undefined, undefined, 0, "openai/gpt-5");
+		expect(line).toBe('  └ [2] explore "lookup"  ⏳ idle  · openai/gpt-5');
+	});
+
+	test("truncates long resolvedModel to 30 chars with ellipsis", () => {
+		const long = "anthropic/claude-opus-4-20250514:high-extended";
+		const line = renderSubagentProgress(0, "task", undefined, undefined, undefined, "thinking", 0, long);
+		// truncate() keeps `max` chars then appends an ellipsis when over the limit
+		expect(line).toContain("· anthropic/claude-opus-4-20250…");
+		expect(line.endsWith("…")).toBe(true);
 	});
 });
