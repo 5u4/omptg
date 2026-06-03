@@ -300,6 +300,29 @@ describe("splitMarkdownForDiscord", () => {
 		expect(recovered.replace(/```ts\n```/g, "")).toContain(body);
 	});
 
+	test("splitter never emits empty / fence-only chunks", () => {
+		const body = "z".repeat(3000);
+		// Cases: fence opener followed by oversized body and closer;
+		// budget too small to keep opener with body in one chunk.
+		const cases: { text: string; budget: number }[] = [
+			{ text: "```ts\n" + body + "\n```", budget: 2000 },
+			{ text: "```\n" + body + "\n```", budget: 1000 },
+			{ text: "```ts\n" + body + "\n```\ntrailer", budget: 1500 },
+		];
+		for (const { text, budget } of cases) {
+			const out = splitMarkdownForDiscord(text, budget);
+			expect(out.length).toBeGreaterThan(0);
+			for (const c of out) {
+				expect(c).not.toBe("```");
+				// Empty fenced block: opener + immediate closer with no body
+				// content. Any chunk where every line is bare fence chrome
+				// would render as a visible empty code block to the user.
+				expect(/^```[^\n]*\n```$/.test(c)).toBe(false);
+				expect(c.length).toBeGreaterThan(0);
+			}
+		}
+	});
+
 	test("empty input returns no chunks", () => {
 		expect(splitMarkdownForDiscord("")).toEqual([]);
 		expect(splitMarkdownForDiscord("   \n  ")).toEqual([]);

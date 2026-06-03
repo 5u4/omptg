@@ -22,13 +22,16 @@ const FENCE_RE = /^ {0,3}```(.*)$/;
 /** Closing-fence overhead added at flush time when a chunk leaves a
  *  fence open: `"\n```"` = 4 chars. */
 const CLOSE_FENCE_COST = 4;
-/** Opening-fence chrome added to a reopening chunk: `"```<info>\n"` —
- *  the variable info-string length is added by callers. */
-const OPEN_FENCE_PREFIX_FIXED = 4; // `"```" + "\n"`
 
 /**
  * Split `text` into chunks of at most `budget` characters, preserving
  * fenced code blocks across boundaries by closing/reopening the fence.
+ *
+ * The invariant we maintain: `buf` holds source lines only. Fence
+ * chrome (synthetic reopener at chunk start, closer at chunk end) is
+ * added at flush time based on `chunkStartOpen` and the live
+ * `openInfo`. This avoids emitting empty `` ```ts\n``` `` chunks when
+ * a hard-split or flush boundary lands on bare fence chrome.
  */
 export function splitMarkdownForDiscord(
 	text: string,
@@ -36,75 +39,124 @@ export function splitMarkdownForDiscord(
 ): string[] {
 	if (!text || text.trim() === "") return [];
 	const lines = text.split("\n");
-	// Drop a trailing empty line caused by a final "\n"; preserve
-	// in-fence whitespace exactly.
 	while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 	if (lines.length === 0) return [];
 
 	const out: string[] = [];
 	let buf: string[] = [];
 	let bufLen = 0; // length of `buf.join("\n")`
+	/** Fence state at the START of the current `buf`. If set, flush
+	 *  prepends `` ```<info>\n `` to make the chunk fence-balanced. */
+	let chunkStartOpen: string | null = null;
+	/** Live fence state after applying every line currently in `buf`.
+	 *  If set at flush, flush appends `\n```` to close. */
 	let openInfo: string | null = null;
 
-	const flush = (carryOpen: boolean): void => {
-		if (buf.length === 0) return;
-		let chunk = buf.join("\n");
-		if (carryOpen && openInfo !== null) chunk += "\n```";
-		out.push(chunk);
+	/** Render the current `buf` with appropriate fence wrappers, or
+	 *  drop it if it would render as nothing but empty fence chrome.
+	 *  After flushing, `buf` is cleared and `chunkStartOpen` resets to
+	 *  the current `openInfo` (the next chunk continues from here). */
+	const flush = (): void => {
+		if (buf.length === 0) {
+			chunkStartOpen = openInfo;
+			return;
+		}
+		// If every buffered line is bare fence chrome (matches
+		// FENCE_RE), the chunk would render as one or more empty code
+		// blocks. Drop it; preserve fence state for the next chunk.
+		if (buf.every(l => FENCE_RE.test(l))) {
+			buf = [];
+			bufLen = 0;
+			chunkStartOpen = openInfo;
+			return;
+		}
+		const body = buf.join("\n");
+		const prefix = chunkStartOpen !== null ? "```" + chunkStartOpen + "\n" : "";
+		const suffix = openInfo !== null ? "\n```" : "";
+		out.push(prefix + body + suffix);
 		buf = [];
 		bufLen = 0;
+		chunkStartOpen = openInfo;
+	};
+
+	/** Length the chunk WOULD render at, given current buf + live
+	 *  open-fence state, including any wrappers. */
+	const renderedLen = (): number => {
+		if (buf.length === 0) return 0;
+		const prefixLen = chunkStartOpen !== null ? 3 + chunkStartOpen.length + 1 : 0;
+		const suffixLen = openInfo !== null ? CLOSE_FENCE_COST : 0;
+		return prefixLen + bufLen + suffixLen;
 	};
 
 	for (const line of lines) {
-		const prevOpenInfo: string | null = openInfo;
 		const fence = line.match(FENCE_RE);
-		if (fence) openInfo = openInfo === null ? fence[1] ?? "" : null;
+		const prevOpenInfo: string | null = openInfo;
+		const nextOpenInfo: string | null = fence
+			? (openInfo === null ? fence[1] ?? "" : null)
+			: openInfo;
 
 		const joinCost = buf.length > 0 ? 1 : 0;
-		const closeAfter = openInfo !== null ? CLOSE_FENCE_COST : 0;
-		const tentativeLen = bufLen + joinCost + line.length + closeAfter;
+		const prefixLen = chunkStartOpen !== null ? 3 + chunkStartOpen.length + 1 : 0;
+		const suffixLen = nextOpenInfo !== null ? CLOSE_FENCE_COST : 0;
+		const tentativeLen = prefixLen + bufLen + joinCost + line.length + suffixLen;
 
 		if (tentativeLen <= budget) {
 			buf.push(line);
 			bufLen += joinCost + line.length;
+			openInfo = nextOpenInfo;
 			continue;
 		}
 
-		// Adding `line` busts budget. If `buf` has content, flush it and
-		// start a fresh chunk carrying the prior fence state.
+		// Adding `line` would bust budget. Flush the existing buf with
+		// its prior fence state so the closing `` ``` `` only counts
+		// against the PRIOR chunk's budget, and start a fresh chunk.
 		if (buf.length > 0) {
+			// At flush time we want the chunk to close based on
+			// prevOpenInfo (the state BEFORE this line's fence toggle).
+			// Briefly rewind `openInfo` so flush() uses the right value.
 			openInfo = prevOpenInfo;
-			flush(prevOpenInfo !== null);
-			if (prevOpenInfo !== null) {
-				const reopener = "```" + prevOpenInfo;
-				buf.push(reopener);
-				bufLen += reopener.length;
-			}
-			// Re-apply this line's fence effect for the fresh chunk.
-			if (fence) openInfo = openInfo === null ? fence[1] ?? "" : null;
+			flush();
+			// After flush, chunkStartOpen = prevOpenInfo. Restore the
+			// live state in preparation for processing `line`.
+			openInfo = prevOpenInfo;
 		}
-		// `buf` may be empty (fresh chunk) or hold just the reopener.
-		// Two sub-cases:
-		//   a) `line` fits in what's left of the budget → push and continue.
-		//   b) `line` is single-line oversized → emit the buffered prefix
-		//      (if any) as its own chunk, then hard-split `line` with
-		//      fence wrapping on every slice.
-		const joinCost2 = buf.length > 0 ? 1 : 0;
-		const closeAfter2 = openInfo !== null ? CLOSE_FENCE_COST : 0;
-		const lineFits = bufLen + joinCost2 + line.length + closeAfter2 <= budget;
+
+		// Now buf is empty. Two sub-cases:
+		//   a) `line` (with wrappers from chunkStartOpen + nextOpenInfo)
+		//      fits in budget → push it.
+		//   b) oversized → hard-split with fence wrapping.
+		const newPrefixLen = chunkStartOpen !== null ? 3 + chunkStartOpen.length + 1 : 0;
+		const newSuffixLen = nextOpenInfo !== null ? CLOSE_FENCE_COST : 0;
+		const lineFits = newPrefixLen + line.length + newSuffixLen <= budget;
 		if (lineFits) {
 			buf.push(line);
-			bufLen += joinCost2 + line.length;
+			bufLen += line.length;
+			openInfo = nextOpenInfo;
 			continue;
 		}
 
-		// Hard-split path. Emit the buffered reopener (if any) as a
-		// standalone, fence-balanced chunk so the hard-split can start
-		// fresh.
-		if (buf.length > 0) flush(openInfo !== null);
-		hardSplitLine(out, line, budget, openInfo);
+		// Hard-split path. If `line` is itself a fence opener/closer,
+		// just toggling the fence — push it and let the next iteration
+		// handle the body (the toggle should never need hard-splitting
+		// because a fence line is at most a few chars).
+		if (fence) {
+			buf.push(line);
+			bufLen += line.length;
+			openInfo = nextOpenInfo;
+			continue;
+		}
+		// Wrap each hard-split slice in `chunkStartOpen` (the active
+		// fence at slice time). If chunkStartOpen is null, the line
+		// lives outside any fence and hard-splits as plain text.
+		hardSplitLine(out, line, budget, chunkStartOpen);
+		// After hard-split the line is fully emitted; reset buf, keep
+		// fence state. `nextOpenInfo === openInfo` here (fence is null
+		// for this branch), so the next chunk continues the same fence.
+		buf = [];
+		bufLen = 0;
+		chunkStartOpen = openInfo;
 	}
-	flush(false);
+	flush();
 	return out;
 }
 
