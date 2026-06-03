@@ -33,9 +33,11 @@
  *
  * Migration: files written before namespacing landed had bare numeric
  * keys (Telegram was the only bridge that ever wrote bindings). On
- * load, any key without a known `<scheme>:` prefix is rewritten as
- * `tg:<key>` and the file is rewritten once. Idempotent: subsequent
- * loads see the prefixed form and skip migration.
+ * load, bare-numeric keys (`^-?\d+$`) are rewritten as `tg:<id>` and
+ * the file is persisted once. Already-prefixed keys are left alone;
+ * non-numeric, non-prefixed keys (operator hand-edits, unknown future
+ * schemes) pass through verbatim so we don't lose data we don't yet
+ * understand. Idempotent: a fully-prefixed file makes no changes.
  *
  * Reads are cached in memory; writes go through `mkdir -p` + atomic
  * tmp-rename so a crash mid-write can't corrupt the file.

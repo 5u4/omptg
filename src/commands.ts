@@ -302,6 +302,13 @@ const cmdBind: Handler = async ctx => {
 	const sep = raw.indexOf("|");
 	const pathPart = (sep >= 0 ? raw.slice(0, sep) : raw).trim();
 	const label = sep >= 0 ? raw.slice(sep + 1).trim() : undefined;
+	if (!pathPart) {
+		// Guard: `resolvePath("")` returns process.cwd(), which would
+		// silently bind to wherever the bot was launched (typically not
+		// what `/bind |label` was meant to do — most likely a typo).
+		await ctx.reply("❌ empty path; usage: /bind <path> [|label]");
+		return;
+	}
 	const expanded = expandHome(pathPart);
 	const abs = resolvePath(expanded);
 	if (!existsSync(abs)) {
