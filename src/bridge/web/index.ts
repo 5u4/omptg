@@ -21,6 +21,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import type {
 	Bridge,
+	ChatId,
 	SessionRoute,
 	SessionTransport,
 	Streamer,
@@ -117,9 +118,17 @@ class WebTransport implements SessionTransport {
 		this.typing = new WebTyping(this.setTurn);
 	}
 
-	newStreamer(_opts: { replyTo?: number }): Streamer {
+	newStreamer(_opts: { replyTo?: number | string }): Streamer {
 		// `replyTo` is telegram-only; web has no reply anchor concept.
 		return new WebStreamer(this.publish);
+	}
+
+	async postSystemMessage(text: string, _opts?: { replyTo?: number | string; silent?: boolean }): Promise<void> {
+		// Web has no separate "system message" channel — render via the
+		// session-level notice event so subscribers see it inline next
+		// to the turn it relates to. `replyTo` / `silent` are
+		// telegram-only and intentionally ignored.
+		this.publish({ kind: "notice", text });
 	}
 
 	async dispose(): Promise<void> {
@@ -185,7 +194,7 @@ export class WebBridge implements Bridge {
 	 *  ignore the args and either reuse an existing route by some
 	 *  caller-side mapping (today: none) or mint a new one. ChatRegistry
 	 *  is currently telegram-shaped so this signature stays compatible. */
-	route(_chatId: number, _threadId?: number): SessionRoute {
+	route(_chatId: ChatId, _threadId?: number): SessionRoute {
 		return this.mintRoute();
 	}
 

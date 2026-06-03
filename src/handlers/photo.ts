@@ -74,7 +74,6 @@ export function installPhotoHandler(deps: Deps): void {
 
 			const chat = deps.registry.get(chatId, threadId);
 			await runTurn({
-				bot: deps.bot,
 				chat,
 				prompt: promptText,
 				replyTo,
