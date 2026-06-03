@@ -10,7 +10,7 @@
  * Real streaming + UI components land in phases 3-4.
  */
 import type { Client, TextChannel, ThreadChannel } from "discord.js";
-import { ChannelType } from "discord.js";
+import { ChannelType, MessageFlags } from "discord.js";
 import type {
 	Bridge,
 	ChatId,
@@ -27,12 +27,12 @@ import { DiscordTyping } from "./typing.ts";
 const DISCORD_SYSTEM_BLOCK = [
 	"You are talking through a Discord bot.",
 	"Discord supports full GitHub-flavored markdown: fenced code blocks",
-	"with language tags, **bold**, *italic*, `inline code`, lists, and",
-	"links. Write markdown normally — no escaping required.",
-	"Per-message hard cap is 2000 characters. Phase 2 will truncate",
-	"replies that exceed the cap; keep individual replies concise and",
-	"split your own output into multiple shorter messages when you have",
-	"a lot to say.",
+	"with language tags, **bold**, *italic*, `inline code`, lists, links,",
+	"and @mentions. Write markdown normally — no escaping required.",
+	"Per-message hard cap is 2000 characters. The bridge auto-splits long",
+	"replies on line boundaries (closing/reopening fenced code blocks",
+	"across the split), but shorter, well-scoped messages render better",
+	"on Discord — prefer multiple focused replies over one wall of text.",
 ].join("\n");
 
 export interface DiscordRouteIds {
@@ -83,8 +83,9 @@ class DiscordTransport implements SessionTransport {
 		this.typing = new DiscordTyping(client, channelId, threadId);
 	}
 
-	newStreamer(_opts: { replyTo?: number | string }): Streamer {
-		return new DiscordStreamer(this.client, this.channelId, this.threadId);
+	newStreamer(opts: { replyTo?: number | string }): Streamer {
+		const replyTo = opts.replyTo === undefined ? undefined : String(opts.replyTo);
+		return new DiscordStreamer(this.client, this.channelId, this.threadId, replyTo);
 	}
 
 	async postSystemMessage(text: string, opts?: { replyTo?: number | string; silent?: boolean }): Promise<void> {
@@ -92,7 +93,13 @@ class DiscordTransport implements SessionTransport {
 		const reply = opts?.replyTo !== undefined ? { messageReference: String(opts.replyTo), failIfNotExists: false } : undefined;
 		await target.send({
 			content: text,
+			// Never let system-message content (errors etc.) ping channels
+			// or roles; the `repliedUser: false` part also guards the
+			// "↪ steered" ack from re-pinging the user even when `silent`
+			// is unset.
+			allowedMentions: { parse: [], repliedUser: false },
 			...(reply ? { reply } : {}),
+			...(opts?.silent ? { flags: MessageFlags.SuppressNotifications } : {}),
 		});
 	}
 
