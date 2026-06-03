@@ -68,6 +68,13 @@ export interface Bridge {
 	 *  their own scheme. ChatRegistry uses this so it never has to
 	 *  import a concrete bridge module. */
 	route(chatId: ChatId, threadId?: number | string): SessionRoute;
+	/** Persistent-binding key for `chatId` (used as the ChatStore primary
+	 *  key). Discriminates IDs across bridges so a numeric Telegram chat
+	 *  id and a numeric-looking Discord snowflake can't collide inside
+	 *  `~/.omptg/chats.json`. Telegram: `tg:<id>`; Discord: `dc:<id>`;
+	 *  Web: `web:<id>`. The thread/topic dimension is NOT encoded here
+	 *  — topics live as nested keys under their group binding. */
+	bindingKey(chatId: ChatId): string;
 	/** Lazily build / fetch the transport for `route`. Same route key
 	 *  MUST return the same transport instance across calls — callbacks
 	 *  / text-reply resolution depend on the per-route `pending()` slot

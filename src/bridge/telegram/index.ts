@@ -243,6 +243,18 @@ export class TelegramBridge implements Bridge {
 		return telegramRoute(n, tid);
 	}
 
+	bindingKey(chatId: ChatId): string {
+		// Telegram chat ids are numeric (positive for users, negative for
+		// groups/supergroups). `tg:` prefix discriminates them from
+		// Discord snowflakes and web-minted ids inside `~/.omptg/chats.json`.
+		const n = typeof chatId === "number" ? chatId : Number(chatId);
+		if (!Number.isSafeInteger(n) || (typeof chatId === "string" && String(n) !== chatId)) {
+			throw new Error(`TelegramBridge.bindingKey: invalid chatId "${chatId}"`);
+		}
+		return `tg:${n}`;
+	}
+
+
 	open(route: SessionRoute): SessionTransport {
 		let t = this.transports.get(route.key);
 		if (!t) {

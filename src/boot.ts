@@ -61,7 +61,11 @@ export async function registerSlashCommands(deps: Deps): Promise<void> {
 export async function wipeChatCommandOverrides(deps: Deps): Promise<void> {
 	const overrideChats = new Set<string>();
 	for (const id of deps.allowedChats) overrideChats.add(id);
-	for (const id of deps.chatStore.chatIds()) overrideChats.add(id);
+	// chatStore.chatIds() returns bridge-prefixed keys (`tg:`, `dc:`, `web:`).
+	// Only Telegram-scoped entries are valid arguments to deleteMyCommands.
+	for (const k of deps.chatStore.chatIds()) {
+		if (k.startsWith("tg:")) overrideChats.add(k.slice(3));
+	}
 	const wiped: Array<{ chat_id: string; ok: boolean; err?: string }> = [];
 	for (const id of overrideChats) {
 		try {

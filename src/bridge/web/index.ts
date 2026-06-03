@@ -198,6 +198,17 @@ export class WebBridge implements Bridge {
 		return this.mintRoute();
 	}
 
+	/** Web ids are minted as `web:<n>` route keys; the persistent
+	 *  binding key is just the route key verbatim. We don't currently
+	 *  expose /bind on the web bridge — every web session starts in
+	 *  its own route — but the method is required by the Bridge
+	 *  contract and lets the shared ChatRegistry/ChatStore plumbing
+	 *  treat all three bridges uniformly. */
+	bindingKey(chatId: ChatId): string {
+		const k = String(chatId);
+		return k.startsWith("web:") ? k : `web:${k}`;
+	}
+
 	mintRoute(): SessionRoute {
 		const id = this.nextId++;
 		const key = `web:${id}`;

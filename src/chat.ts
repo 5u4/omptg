@@ -22,7 +22,7 @@ import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import type { Bridge, ChatId, InteractiveUI, PendingUiRequest, SessionRoute, SessionTransport, Streamer, Typing } from "./bridge/types.ts";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { scoped } from "./logger.ts";
-import { ChatStore } from "./chat-store.ts";
+import { ChatStore, type ChatBinding, type TopicBinding } from "./chat-store.ts";
 import { renderToolStart, renderToolEnd, renderSubagentProgress } from "./tool-render.ts";
 import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -861,14 +861,54 @@ export class ChatRegistry {
 		return this.bridge.route(chatId, threadId);
 	}
 
-	/** Persistent binding store, exposed for command handlers. */
-	get bindings(): ChatStore {
-		return this.store;
+	/** Resolve raw `chatId` into its bridge-prefixed ChatStore key.
+	 *  Centralised here so command handlers never have to know which
+	 *  bridge they're running under. */
+	private bkey(chatId: ChatId): string {
+		return this.bridge.bindingKey(chatId);
 	}
 
 	/** Three-level resolution: topic binding → group binding → defaultCwd. */
 	cwdFor(chatId: ChatId, threadId?: number | string): string {
-		return this.store.resolveCwd(chatId, threadId) ?? this.defaultCwd;
+		return this.store.resolveCwd(this.bkey(chatId), threadId) ?? this.defaultCwd;
+	}
+
+	/** Get the group-level binding for a chat (no topic resolution). */
+	getBinding(chatId: ChatId): ChatBinding | undefined {
+		return this.store.get(this.bkey(chatId));
+	}
+
+	/** Get the topic-level binding, or undefined. */
+	getTopicBinding(chatId: ChatId, threadId: number | string): TopicBinding | undefined {
+		return this.store.getTopic(this.bkey(chatId), threadId);
+	}
+
+	/** Set a binding. `threadId` defined → topic-scope; else group-scope. */
+	setBinding(
+		chatId: ChatId,
+		binding: { cwd: string; label?: string },
+		opts: { threadId?: number | string } = {},
+	): void {
+		const k = this.bkey(chatId);
+		if (opts.threadId !== undefined) {
+			this.store.setTopic(k, opts.threadId, binding);
+		} else {
+			this.store.set(k, binding);
+		}
+	}
+
+	/** Delete a binding. Returns false when nothing existed at that scope. */
+	deleteBinding(chatId: ChatId, threadId?: number | string): boolean {
+		const k = this.bkey(chatId);
+		return threadId !== undefined
+			? this.store.deleteTopic(k, threadId)
+			: this.store.delete(k);
+	}
+
+	/** Topic ids configured under this chat's group binding. Strings are
+	 *  the bridge-native id (Telegram numeric, Discord snowflake). */
+	topicBindingIds(chatId: ChatId): string[] {
+		return this.store.topicIds(this.bkey(chatId));
 	}
 
 	private key(chatId: ChatId, threadId?: number | string): string {

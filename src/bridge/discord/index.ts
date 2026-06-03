@@ -157,6 +157,13 @@ export class DiscordBridge implements Bridge {
 		return discordRoute(channelId, tid);
 	}
 
+	bindingKey(chatId: ChatId): string {
+		// Discord ids are snowflake strings; `dc:` prefix mirrors what
+		// route()/discordRouteKey already do for in-memory routes, but
+		// here applied to the persistent /bind store key.
+		return `dc:${normalizeSnowflake(chatId, "channelId")}`;
+	}
+
 	open(route: SessionRoute): SessionTransport {
 		let t = this.transports.get(route.key);
 		if (!t) {
