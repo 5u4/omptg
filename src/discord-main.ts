@@ -1,9 +1,14 @@
 /**
- * omptg Discord bridge entrypoint — Phase 2 skeleton.
+ * omptg Discord bridge entrypoint.
  *
  * Connects discord.js, mounts the bridge + ChatRegistry, installs the
- * `messageCreate` handler. Agent dispatch is NOT wired yet (Phase 5);
- * Phase 2 only proves channel↔thread routing end-to-end.
+ * messageCreate / interactionCreate / slash-command handlers, and
+ * registers slash commands with Discord on ClientReady (guild-scoped
+ * when DISCORD_DEV_GUILDS is set, otherwise global).
+ *
+ * The messageCreate handler still echoes (agent dispatch from inbound
+ * messages lands in a later phase); slash commands route through the
+ * shared bridge-agnostic dispatcher in src/commands.ts.
  */
 import { Client, GatewayIntentBits, Events } from "discord.js";
 import { existsSync, mkdirSync } from "node:fs";

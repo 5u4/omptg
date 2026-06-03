@@ -100,7 +100,9 @@ export class ChatStore {
 		try {
 			const raw = readFileSync(this.path, "utf8");
 			const parsed = JSON.parse(raw) as ChatStoreFile;
-			if (!parsed || typeof parsed !== "object" || !parsed.chats) {
+			if (!parsed || typeof parsed !== "object"
+				|| !parsed.chats || typeof parsed.chats !== "object" || Array.isArray(parsed.chats)
+			) {
 				return { chats: {} };
 			}
 			return this.migrate(parsed);
@@ -111,14 +113,24 @@ export class ChatStore {
 		}
 	}
 
-	/** Rewrite any bare-numeric keys (legacy Telegram-only schema) as
-	 *  `tg:<id>`. If any rewrites happened, persist immediately so the
-	 *  file matches the in-memory shape on the next process boot. */
+	/** Rewrite bare-numeric legacy keys (Telegram was the only bridge
+	 *  that ever wrote bindings before namespacing landed) as `tg:<id>`.
+	 *  Non-numeric, non-prefixed keys are left untouched — they might
+	 *  be operator hand-edits or a future bridge scheme we don't
+	 *  recognize yet, and silently rebranding them as Telegram would
+	 *  be lossy. Idempotent: a fully-prefixed file makes no changes
+	 *  and skips the save. */
 	private migrate(parsed: ChatStoreFile): ChatStoreFile {
 		let mutated = false;
 		const next: Record<string, ChatBinding> = {};
 		for (const [k, v] of Object.entries(parsed.chats)) {
 			if (hasKnownPrefix(k)) {
+				next[k] = v;
+				continue;
+			}
+			if (!/^-?\d+$/.test(k)) {
+				// Unrecognized non-numeric key. Keep verbatim so we don't
+				// destroy unknown data; nothing in the new API reads it.
 				next[k] = v;
 				continue;
 			}

@@ -113,6 +113,24 @@ describe("ChatStore", () => {
 		expect(s.chatIds()).toEqual([]);
 	});
 
+	test("non-object `chats` field is treated as empty (does not crash migration)", () => {
+		// Defensive: a hand-edited or partially-corrupted file with
+		// `{ "chats": "abc" }` was previously fed into Object.entries
+		// which iterates the string as characters and migrated them to
+		// `tg:0`/`tg:1`/... Reject the load up front instead.
+		const path = join(tmpDir, "bad-chats-string.json");
+		writeFileSync(path, JSON.stringify({ chats: "abc" }));
+		const s = new ChatStore(path);
+		expect(s.chatIds()).toEqual([]);
+	});
+
+	test("array `chats` field is treated as empty", () => {
+		const path = join(tmpDir, "bad-chats-array.json");
+		writeFileSync(path, JSON.stringify({ chats: [{ cwd: "/x" }] }));
+		const s = new ChatStore(path);
+		expect(s.chatIds()).toEqual([]);
+	});
+
 	test("atomic write does not leave .tmp file behind", () => {
 		const s = new ChatStore(storePath);
 		s.set("tg:1", { cwd: "/x" });
@@ -173,6 +191,24 @@ describe("ChatStore — legacy-key migration", () => {
 		const s = new ChatStore(path);
 		expect(s.chatIds()).toEqual(["tg:42"]);
 		expect(s.get("tg:42")?.cwd).toBe("/new");
+	});
+
+	test("non-numeric, non-prefixed keys are kept verbatim (not silently relabeled as tg:)", () => {
+		// A future bridge or operator hand-edit might write a key the
+		// current code doesn't recognize. Migration must not silently
+		// brand it as Telegram — that would lose data the next time the
+		// real bridge tries to read it. Pass through untouched.
+		const path = join(tmpDir, "unknown-scheme.json");
+		writeFileSync(path, JSON.stringify({
+			chats: {
+				"unknown-scheme-id": { cwd: "/u", added_at: "2024-01-01T00:00:00.000Z" },
+				"42": { cwd: "/t", added_at: "2024-02-01T00:00:00.000Z" },
+			},
+		}));
+		const s = new ChatStore(path);
+		// `42` migrates; `unknown-scheme-id` survives as-is.
+		expect(s.chatIds().sort()).toEqual(["tg:42", "unknown-scheme-id"]);
+		expect(s.get("unknown-scheme-id")?.cwd).toBe("/u");
 	});
 });
 

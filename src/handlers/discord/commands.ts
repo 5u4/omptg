@@ -118,7 +118,13 @@ async function handle(interaction: ChatInputCommandInteraction, deps: HandleDeps
 		chatId: channelId,
 		threadId,
 		chatType: ch.isThread() ? "thread" : "channel",
-		chatTitle: "name" in ch && typeof ch.name === "string" ? ch.name : undefined,
+		// In a thread, `ch.name` is the thread name — but `chatId` is the
+		// PARENT channel snowflake, so report the parent's name to keep
+		// title and id in sync (matches Telegram, where ctx.chat.title is
+		// the group title even when the message lives in a topic).
+		chatTitle: ch.isThread()
+			? (ch.parent?.name ?? undefined)
+			: ("name" in ch && typeof ch.name === "string" ? ch.name : undefined),
 		arg: collectArgString(interaction),
 		registry: deps.registry,
 		defaultCwd: deps.defaultCwd,
