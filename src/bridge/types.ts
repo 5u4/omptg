@@ -30,6 +30,23 @@ export interface InteractiveUI extends ExtensionUIContext {
 		| { kind: "text"; text: string }): boolean;
 }
 
+/**
+ * Bridge-agnostic conversation identifier.
+ *
+ * - Telegram chat ids are 53-bit-safe numbers (kept as `number` to
+ *   avoid breaking the existing path).
+ * - Discord snowflakes exceed `Number.MAX_SAFE_INTEGER` and MUST be
+ *   represented as strings — any numeric coercion silently rounds
+ *   high-bit ids together.
+ * - Web-bridge synthesizes its own opaque keys via `mintRoute`; the
+ *   id arg is ignored, so either flavor passes through.
+ *
+ * ChatRegistry, ChatSession, and the Bridge contract carry this
+ * widened type. Each concrete bridge narrows back to its native
+ * shape at its `route()` boundary (telegram coerces to `number`).
+ */
+export type ChatId = number | string;
+
 /** Opaque routing key for a single conversation. Telegram packs
  *  `${chatId}:${threadId ?? ""}`; web packs `web:<n>`. ChatRegistry uses
  *  this verbatim as its map key and as the ChatStore binding key. */
@@ -50,7 +67,7 @@ export interface Bridge {
 	 *  for ChatStore binding compatibility); web bridges synthesize
 	 *  their own scheme. ChatRegistry uses this so it never has to
 	 *  import a concrete bridge module. */
-	route(chatId: number, threadId?: number): SessionRoute;
+	route(chatId: ChatId, threadId?: number): SessionRoute;
 	/** Lazily build / fetch the transport for `route`. Same route key
 	 *  MUST return the same transport instance across calls — callbacks
 	 *  / text-reply resolution depend on the per-route `pending()` slot
@@ -62,11 +79,21 @@ export interface Bridge {
 export interface SessionTransport {
 	readonly ui: InteractiveUI;
 	readonly typing: Typing;
-	/** Build a fresh per-turn streamer. `replyTo` is the telegram
-	 *  message_id of the user's prompt (used as `reply_parameters` on
-	 *  the first assistant chunk); ignored by transports that don't
-	 *  have a notion of reply-to. */
-	newStreamer(opts: { replyTo?: number }): Streamer;
+	/** Build a fresh per-turn streamer. `replyTo` is the user's
+	 *  prompt-message id (telegram: numeric `message_id`; discord:
+	 *  snowflake string), used to anchor the first assistant chunk as
+	 *  a reply. Ignored by transports without a reply-to primitive
+	 *  (web). Kept `number | string` so the contract survives both
+	 *  id namespaces. */
+	newStreamer(opts: { replyTo?: number | string }): Streamer;
+	/** Post a transient bridge-side system line that's NOT part of the
+	 *  agent turn — the "↪ steered" ack when a user message lands
+	 *  mid-turn (silent), or a fatal turn error (audible). Telegram
+	 *  sends a real chat message anchored to `replyTo`; web publishes
+	 *  a `notice` SessionEvent. `replyTo` (number | string for parity
+	 *  with snowflake ids) and `silent` are bridge-opaque and MAY be
+	 *  ignored. */
+	postSystemMessage(text: string, opts?: { replyTo?: number | string; silent?: boolean }): Promise<void>;
 	dispose(): Promise<void>;
 }
 

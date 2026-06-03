@@ -164,7 +164,6 @@ export function installTextHandler(deps: Deps): void {
 		if (reply) promptText = formatReplyPrompt(reply, promptText);
 
 		void runTurn({
-			bot: deps.bot,
 			chat,
 			prompt: promptText,
 			replyTo: ctx.message.message_id,

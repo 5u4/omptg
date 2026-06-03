@@ -34,7 +34,6 @@ export async function dispatchVoiceText(
 ): Promise<void> {
 	const chat = deps.registry.get(chatId, threadId);
 	await runTurn({
-		bot: deps.bot,
 		chat,
 		prompt: text,
 		replyTo,

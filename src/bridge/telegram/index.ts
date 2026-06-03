@@ -11,6 +11,7 @@
 import type { Bot } from "grammy";
 import type {
 	Bridge,
+	ChatId,
 	SessionRoute,
 	SessionTransport,
 	Streamer,
@@ -153,9 +154,44 @@ class TelegramTransport implements SessionTransport {
 		this.typing = new TypingIndicator(bot, chatId, threadId);
 	}
 
-	newStreamer(opts: { replyTo?: number }): Streamer {
-		const inner = new TelegramStreamer(this.bot, this.chatId, opts.replyTo, this.threadId);
+	newStreamer(opts: { replyTo?: number | string }): Streamer {
+		const inner = new TelegramStreamer(
+			this.bot,
+			this.chatId,
+			this.narrowReplyTo(opts.replyTo),
+			this.threadId,
+		);
 		return new TelegramStreamerAdapter(inner);
+	}
+
+	async postSystemMessage(text: string, opts?: { replyTo?: number | string; silent?: boolean }): Promise<void> {
+		// Telegram parity with the pre-bridge handler/turn.ts behavior:
+		// reply-anchored to the user's triggering message, posted into
+		// the forum topic when this transport is forum-scoped, and
+		// silenced for the steered-mid-turn ack (the user already heard
+		// the original send ping).
+		const reply = this.narrowReplyTo(opts?.replyTo);
+		const topicOpts = this.threadId !== undefined ? { message_thread_id: this.threadId } : {};
+		const replyOpts = reply !== undefined ? { reply_parameters: { message_id: reply } } : {};
+		const silentOpts = opts?.silent ? { disable_notification: true } : {};
+		await this.bot.api.sendMessage(this.chatId, text, { ...topicOpts, ...replyOpts, ...silentOpts });
+	}
+
+	/** Same precision-loss guard as `TelegramBridge.route`'s chatId
+	 *  narrowing: a string `replyTo` is only legal if it round-trips
+	 *  through `Number` AND stays within the safe-integer range.
+	 *  `Number.isFinite` is not enough — snowflakes like
+	 *  `"1099511627776000000"` look like clean round-trips but are
+	 *  not safe integers. Anything else is a misroute (most likely a
+	 *  discord snowflake message id) and we throw rather than silently
+	 *  anchor a reply to a rounded message_id. */
+	private narrowReplyTo(replyTo: number | string | undefined): number | undefined {
+		if (replyTo === undefined) return undefined;
+		const n = typeof replyTo === "number" ? replyTo : Number(replyTo);
+		if (!Number.isSafeInteger(n) || (typeof replyTo === "string" && String(n) !== replyTo)) {
+			throw new Error(`TelegramTransport: non-numeric or out-of-range replyTo "${replyTo}"`);
+		}
+		return n;
 	}
 
 	async dispose(): Promise<void> {
@@ -173,8 +209,26 @@ export class TelegramBridge implements Bridge {
 		return TELEGRAM_SYSTEM_BLOCK;
 	}
 
-	route(chatId: number, threadId?: number): SessionRoute {
-		return telegramRoute(chatId, threadId);
+	route(chatId: ChatId, threadId?: number): SessionRoute {
+		// Telegram chat ids are numeric and well within JS safe-integer
+		// range. A string here means a caller (most likely a future
+		// discord-bridge route mistakenly hitting the telegram bridge)
+		// is misrouted. Coerce, but reject any value that loses
+		// precision under `Number(...)`: snowflakes like
+		// `"1099511627776000000"` round-trip through `String(n)`
+		// identically yet are NOT safe integers — the only reliable
+		// guard is `Number.isSafeInteger`. The loud throw is the
+		// contract phase 2 depends on for misroute detection.
+		let n: number;
+		if (typeof chatId === "number") {
+			n = chatId;
+		} else {
+			n = Number(chatId);
+		}
+		if (!Number.isSafeInteger(n) || (typeof chatId === "string" && String(n) !== chatId)) {
+			throw new Error(`TelegramBridge: non-numeric or out-of-range chatId "${chatId}"`);
+		}
+		return telegramRoute(n, threadId);
 	}
 
 	open(route: SessionRoute): SessionTransport {

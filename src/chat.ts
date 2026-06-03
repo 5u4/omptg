@@ -19,7 +19,7 @@ import type {
 	SessionInfo,
 } from "@oh-my-pi/pi-coding-agent";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import type { Bridge, InteractiveUI, PendingUiRequest, SessionRoute, SessionTransport, Streamer, Typing } from "./bridge/types.ts";
+import type { Bridge, ChatId, InteractiveUI, PendingUiRequest, SessionRoute, SessionTransport, Streamer, Typing } from "./bridge/types.ts";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { scoped } from "./logger.ts";
 import { ChatStore } from "./chat-store.ts";
@@ -33,7 +33,7 @@ import {
 import type { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 export interface ChatSessionOptions {
-	chatId: number;
+	chatId: ChatId;
 	cwd: string;
 	transport: SessionTransport;
 	/** System-prompt addendum from the bridge (telegram/web rendering rules). */
@@ -106,7 +106,7 @@ function extractFirstUserText(messages: readonly unknown[]): string | undefined 
 }
 
 export class ChatSession {
-	readonly chatId: number;
+	readonly chatId: ChatId;
 	readonly threadId: number | undefined;
 	cwd: string;
 	private readonly transport: SessionTransport;
@@ -226,6 +226,14 @@ export class ChatSession {
 	 *  subscribers see `finalize` indistinguishable from success. */
 	get currentStreamer(): Streamer | undefined {
 		return this.streamer;
+	}
+
+	/** Forward a bridge-side system line (steered ack, fatal turn
+	 *  error) to the bound transport. Kept as a thin forwarder rather
+	 *  than exposing the full transport so handlers can't reach in and
+	 *  build rogue streamers or dispose the transport mid-turn. */
+	postSystemMessage(text: string, opts?: { replyTo?: number | string; silent?: boolean }): Promise<void> {
+		return this.transport.postSystemMessage(text, opts);
 	}
 
 	/** True from the moment we dispatch a user turn until `agent_end`
@@ -419,7 +427,7 @@ export class ChatSession {
 	 *  stopped via the `agent_end` path (or the finalize fallback). */
 	async prompt(
 		text: string,
-		opts?: { replyTo?: number; images?: ImageContent[] },
+		opts?: { replyTo?: number | string; images?: ImageContent[] },
 	): Promise<Streamer> {
 		const s = await this.ensure();
 		if (this.firstUserText === undefined) this.firstUserText = text;
@@ -841,7 +849,7 @@ export class ChatRegistry {
 	/** Build the per-route SessionRoute. Delegates to the active bridge
 	 *  so ChatRegistry stays transport-neutral; the bridge picks the
 	 *  scheme (telegram packs chatId:threadId, web mints `web:<n>`). */
-	private route(chatId: number, threadId?: number): SessionRoute {
+	private route(chatId: ChatId, threadId?: number): SessionRoute {
 		return this.bridge.route(chatId, threadId);
 	}
 
@@ -851,15 +859,15 @@ export class ChatRegistry {
 	}
 
 	/** Three-level resolution: topic binding → group binding → defaultCwd. */
-	cwdFor(chatId: number, threadId?: number): string {
+	cwdFor(chatId: ChatId, threadId?: number): string {
 		return this.store.resolveCwd(chatId, threadId) ?? this.defaultCwd;
 	}
 
-	private key(chatId: number, threadId?: number): string {
+	private key(chatId: ChatId, threadId?: number): string {
 		return this.route(chatId, threadId).key;
 	}
 
-	get(chatId: number, threadId?: number): ChatSession {
+	get(chatId: ChatId, threadId?: number): ChatSession {
 		const k = this.key(chatId, threadId);
 		let chat = this.chats.get(k);
 		if (!chat) {

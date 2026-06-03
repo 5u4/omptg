@@ -11,25 +11,29 @@
  *
  * Inlining this in three places guaranteed they drifted; pulling it
  * here means a fix to (e.g.) steered ack wording lands once.
+ *
+ * Phase 1 of the discord-bridge plan extracted the grammy-direct
+ * sendMessage calls behind `SessionTransport.postSystemMessage`, so
+ * this file is bridge-agnostic — the only handle it needs is the
+ * `ChatSession` itself.
  */
-import type { Bot } from "grammy";
 import type { ChatSession } from "../chat.ts";
 import { scoped } from "../logger.ts";
 
 const log = scoped("turn");
 
 export interface TurnArgs {
-	bot: Bot;
 	/** chatId / threadId are read off this — callers used to pass them
 	 *  separately and could (and occasionally did) get them out of sync. */
 	chat: ChatSession;
 	/** Already-composed prompt text (caller wraps quote / forward / image-path
 	 *  framing). The agent receives this verbatim. */
 	prompt: string;
-	/** message_id of the user's triggering message — used both as the
-	 *  reply target on the agent's first chunk and as the anchor for the
-	 *  steered/error notifications. */
-	replyTo: number;
+	/** Triggering-message id for the bridge to anchor system messages
+	 *  against (telegram: numeric `reply_parameters.message_id`;
+	 *  discord: snowflake string). Opaque to this layer; the transport
+	 *  decides how (or whether) to use it. */
+	replyTo: number | string;
 	/** Tag for log scoping ("voice", "photo", "text"). */
 	source: "voice" | "photo" | "text";
 }
@@ -41,17 +45,15 @@ export interface TurnArgs {
  * can flow through, otherwise we deadlock on our own session.
  */
 export async function runTurn(args: TurnArgs): Promise<void> {
-	const { bot, chat, prompt, replyTo, source } = args;
-	const { chatId, threadId } = chat;
-	const topicOpts = threadId !== undefined ? { message_thread_id: threadId } : {};
+	const { chat, prompt, replyTo, source } = args;
 	try {
 		if (chat.isTurnActive) {
-			// Silent: the new message is mid-turn input, not a fresh prompt.
-			// The user already heard the bubble fire when they sent.
-			await bot.api.sendMessage(chatId, "↪ steered (/cancel to abort)", {
-				disable_notification: true,
-				reply_parameters: { message_id: replyTo },
-				...topicOpts,
+			// Silent: the new message is mid-turn input, not a fresh
+			// prompt. The user already heard the bubble fire when they
+			// sent, so suppress notification on the ack.
+			await chat.postSystemMessage("↪ steered (/cancel to abort)", {
+				replyTo,
+				silent: true,
 			});
 		}
 		await chat.prompt(prompt, { replyTo });
@@ -60,18 +62,14 @@ export async function runTurn(args: TurnArgs): Promise<void> {
 	} catch (err) {
 		log.error("turn.failed", {
 			source,
-			chat_id: chatId,
+			chat_id: chat.chatId,
 			err: String(err),
 			stack: err instanceof Error ? err.stack : undefined,
 		});
 		try {
-			await bot.api.sendMessage(
-				chatId,
+			await chat.postSystemMessage(
 				`❌ ${err instanceof Error ? err.message : String(err)}`,
-				{
-					reply_parameters: { message_id: replyTo },
-					...topicOpts,
-				},
+				{ replyTo },
 			);
 		} catch (replyErr) {
 			log.error("turn.error_reply_failed", { source, err: String(replyErr) });
