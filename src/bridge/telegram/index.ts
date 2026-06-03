@@ -209,7 +209,7 @@ export class TelegramBridge implements Bridge {
 		return TELEGRAM_SYSTEM_BLOCK;
 	}
 
-	route(chatId: ChatId, threadId?: number): SessionRoute {
+	route(chatId: ChatId, threadId?: number | string): SessionRoute {
 		// Telegram chat ids are numeric and well within JS safe-integer
 		// range. A string here means a caller (most likely a future
 		// discord-bridge route mistakenly hitting the telegram bridge)
@@ -228,7 +228,19 @@ export class TelegramBridge implements Bridge {
 		if (!Number.isSafeInteger(n) || (typeof chatId === "string" && String(n) !== chatId)) {
 			throw new Error(`TelegramBridge: non-numeric or out-of-range chatId "${chatId}"`);
 		}
-		return telegramRoute(n, threadId);
+		let tid: number | undefined;
+		if (threadId === undefined) {
+			tid = undefined;
+		} else if (typeof threadId === "number") {
+			tid = threadId;
+		} else {
+			const tn = Number(threadId);
+			if (!Number.isSafeInteger(tn) || String(tn) !== threadId) {
+				throw new Error(`TelegramBridge: non-numeric or out-of-range threadId "${threadId}"`);
+			}
+			tid = tn;
+		}
+		return telegramRoute(n, tid);
 	}
 
 	open(route: SessionRoute): SessionTransport {

@@ -194,7 +194,7 @@ export class WebBridge implements Bridge {
 	 *  ignore the args and either reuse an existing route by some
 	 *  caller-side mapping (today: none) or mint a new one. ChatRegistry
 	 *  is currently telegram-shaped so this signature stays compatible. */
-	route(_chatId: ChatId, _threadId?: number): SessionRoute {
+	route(_chatId: ChatId, _threadId?: number | string): SessionRoute {
 		return this.mintRoute();
 	}
 
