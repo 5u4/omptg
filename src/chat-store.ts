@@ -15,6 +15,10 @@
  *   }
  *
  * Three-level cwd resolution: topic binding → group binding → default.
+ * This file owns the first two; `resolveCwd` returns undefined when
+ * nothing is bound at either level. The "default" third step lives in
+ * `ChatRegistry.cwdFor`, which knows the bridge-supplied fallback and
+ * substitutes it for the undefined return.
  * Forum topics / Discord threads are addressed by their bridge-native
  * id stringified (Telegram: `message_thread_id`; Discord: thread
  * snowflake). Telegram's "General" topic and non-forum supergroups are

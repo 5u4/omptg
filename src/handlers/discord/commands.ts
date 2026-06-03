@@ -85,7 +85,14 @@ async function handle(interaction: ChatInputCommandInteraction, deps: HandleDeps
 	let channelId: string;
 	let threadId: string | undefined;
 	if (ch.isThread()) {
-		if (!ch.parentId) return;
+		if (!ch.parentId) {
+			// Defensive: discord.js threads always carry parentId, but the
+			// type is optional and the parent could in theory be deleted
+			// mid-flight. Ack ephemerally so the user sees a real message
+			// instead of Discord's red "interaction failed" toast.
+			await interaction.reply({ content: "⊘ thread has no parent channel", flags: MessageFlags.Ephemeral });
+			return;
+		}
 		channelId = ch.parentId;
 		threadId = ch.id;
 	} else {
@@ -170,8 +177,15 @@ function collectArgString(interaction: ChatInputCommandInteraction): string {
 async function safeReply(interaction: ChatInputCommandInteraction, text: string): Promise<void> {
 	const body = { content: text.slice(0, DISCORD_MAX_MESSAGE), flags: MessageFlags.Ephemeral } as const;
 	try {
-		if (interaction.deferred || interaction.replied) {
+		// Deferred-but-not-replied: the deferReply() already promised a
+		// public response. Using followUp() here would leave that public
+		// promise stuck on "Bot is thinking…" forever and post the error
+		// as a separate ephemeral message only the invoker sees. editReply
+		// resolves the deferred ack with the error text instead.
+		if (interaction.replied) {
 			await interaction.followUp(body);
+		} else if (interaction.deferred) {
+			await interaction.editReply({ content: body.content });
 		} else {
 			await interaction.reply(body);
 		}
