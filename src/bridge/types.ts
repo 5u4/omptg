@@ -57,7 +57,7 @@ export interface SessionRoute {
 }
 
 export interface Bridge {
-	readonly kind: "telegram" | "web";
+	readonly kind: "telegram" | "web" | "discord";
 	/** Appended to every agent session's system prompt so the model
 	 *  knows what rendering rules its output will hit (MarkdownV2 for
 	 *  Telegram, full markdown for web). */
@@ -67,7 +67,7 @@ export interface Bridge {
 	 *  for ChatStore binding compatibility); web bridges synthesize
 	 *  their own scheme. ChatRegistry uses this so it never has to
 	 *  import a concrete bridge module. */
-	route(chatId: ChatId, threadId?: number): SessionRoute;
+	route(chatId: ChatId, threadId?: number | string): SessionRoute;
 	/** Lazily build / fetch the transport for `route`. Same route key
 	 *  MUST return the same transport instance across calls — callbacks
 	 *  / text-reply resolution depend on the per-route `pending()` slot

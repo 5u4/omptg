@@ -41,7 +41,7 @@ export interface ChatSessionOptions {
 	/** Forum topic id this session is scoped to. undefined = DM / non-forum
 	 *  group / forum General topic. Drives both ChatRegistry keying and
 	 *  outbound message routing (sendMessage / sendChatAction). */
-	threadId?: number;
+	threadId?: number | string;
 }
 
 /**
@@ -107,7 +107,7 @@ function extractFirstUserText(messages: readonly unknown[]): string | undefined 
 
 export class ChatSession {
 	readonly chatId: ChatId;
-	readonly threadId: number | undefined;
+	readonly threadId: number | string | undefined;
 	cwd: string;
 	private readonly transport: SessionTransport;
 	private readonly systemPromptAddendum: string;
@@ -849,7 +849,7 @@ export class ChatRegistry {
 	/** Build the per-route SessionRoute. Delegates to the active bridge
 	 *  so ChatRegistry stays transport-neutral; the bridge picks the
 	 *  scheme (telegram packs chatId:threadId, web mints `web:<n>`). */
-	private route(chatId: ChatId, threadId?: number): SessionRoute {
+	private route(chatId: ChatId, threadId?: number | string): SessionRoute {
 		return this.bridge.route(chatId, threadId);
 	}
 
@@ -859,15 +859,15 @@ export class ChatRegistry {
 	}
 
 	/** Three-level resolution: topic binding → group binding → defaultCwd. */
-	cwdFor(chatId: ChatId, threadId?: number): string {
+	cwdFor(chatId: ChatId, threadId?: number | string): string {
 		return this.store.resolveCwd(chatId, threadId) ?? this.defaultCwd;
 	}
 
-	private key(chatId: ChatId, threadId?: number): string {
+	private key(chatId: ChatId, threadId?: number | string): string {
 		return this.route(chatId, threadId).key;
 	}
 
-	get(chatId: ChatId, threadId?: number): ChatSession {
+	get(chatId: ChatId, threadId?: number | string): ChatSession {
 		const k = this.key(chatId, threadId);
 		let chat = this.chats.get(k);
 		if (!chat) {
