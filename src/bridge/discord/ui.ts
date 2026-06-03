@@ -514,7 +514,7 @@ export class DiscordUI implements InteractiveUI {
 			const suffix = answer === undefined
 				? "⊘ cancelled"
 				: `→ ${truncate(answer, CARRIER_ANSWER_PREVIEW)}`;
-			this.editCarrier(sent.id, `✅ ${truncate(args.title, CARRIER_TITLE_BUDGET_TEXT)}  ${suffix}`, "input");
+			this.editCarrier(sent.id, `✅ ${truncate(args.title, CARRIER_TITLE_BUDGET_TEXT)}  ${suffix}`, args.multiline ? "editor" : "input");
 			resolve(answer);
 		};
 		this.current = {
