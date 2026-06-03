@@ -323,8 +323,68 @@ describe("splitMarkdownForDiscord", () => {
 		}
 	});
 
+	test("budget <= 0 throws RangeError instead of looping", () => {
+		expect(() => splitMarkdownForDiscord("hello", 0)).toThrow(RangeError);
+		expect(() => splitMarkdownForDiscord("hello", -10)).toThrow(RangeError);
+	});
+
 	test("empty input returns no chunks", () => {
 		expect(splitMarkdownForDiscord("")).toEqual([]);
 		expect(splitMarkdownForDiscord("   \n  ")).toEqual([]);
+	});
+});
+
+describe("DiscordStreamer mention safety + target caching", () => {
+	test("every send carries allowedMentions = { parse: [], repliedUser: false }", async () => {
+		const { client, channelId, sends } = stubClient();
+		const s = new DiscordStreamer(client, channelId, undefined, "999");
+		// Activity send (initial open) + commitAssistant send.
+		await s.toolStart("t1", "📖 read a.ts", "read", {});
+		await s.commitAssistant("@everyone hi");
+		expect(sends.length).toBeGreaterThanOrEqual(2);
+		for (const sent of sends) {
+			expect(sent.opts?.allowedMentions).toEqual({ parse: [], repliedUser: false });
+		}
+	});
+
+	test("replaceWith body also carries allowedMentions", async () => {
+		const { client, channelId, sends } = stubClient();
+		const s = new DiscordStreamer(client, channelId, undefined);
+		await s.replaceWith("fatal: @here something broke");
+		const errorSend = sends.find(x => x.content === "fatal: @here something broke");
+		expect(errorSend).toBeDefined();
+		expect(errorSend!.opts?.allowedMentions).toEqual({ parse: [], repliedUser: false });
+	});
+
+	test("a failed channel fetch is not cached; subsequent sends retry the fetch", async () => {
+		const sends: Sent[] = [];
+		let fetchCalls = 0;
+		const target: FakeTarget = {
+			send: async (payload) => {
+				const messageId = String(++fetchCalls + 1000);
+				const { content, ...opts } = payload;
+				sends.push({ content, opts: Object.keys(opts).length ? opts : undefined, messageId });
+				return { id: messageId, edit: async () => undefined };
+			},
+		};
+		const fakeChannel = { type: 0, isThread: () => false, send: target.send };
+		const client = {
+			channels: {
+				fetch: async (_id: string) => {
+					fetchCalls++;
+					if (fetchCalls === 1) throw new Error("transient gateway error");
+					return fakeChannel;
+				},
+			},
+		} as unknown as Client;
+
+		const s = new DiscordStreamer(client, "111", undefined);
+		// First send fails at the resolve step; nothing in `sends`.
+		await s.commitAssistant("first try");
+		expect(sends.length).toBe(0);
+		// Second send must retry the channel fetch (poisoned cache would
+		// reuse the rejected promise and never call send).
+		await s.commitAssistant("second try");
+		expect(sends.some(x => x.content === "second try")).toBe(true);
 	});
 });

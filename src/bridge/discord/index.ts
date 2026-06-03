@@ -93,10 +93,12 @@ class DiscordTransport implements SessionTransport {
 		const reply = opts?.replyTo !== undefined ? { messageReference: String(opts.replyTo), failIfNotExists: false } : undefined;
 		await target.send({
 			content: text,
+			// Never let system-message content (errors etc.) ping channels
+			// or roles; the `repliedUser: false` part also guards the
+			// "↪ steered" ack from re-pinging the user even when `silent`
+			// is unset.
+			allowedMentions: { parse: [], repliedUser: false },
 			...(reply ? { reply } : {}),
-			// `silent` maps to Discord's per-message push suppression.
-			// Default to NOT silent — system messages (errors, "↪ steered"
-			// acks) without `silent` set are user-visible announcements.
 			...(opts?.silent ? { flags: MessageFlags.SuppressNotifications } : {}),
 		});
 	}

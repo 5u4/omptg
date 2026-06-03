@@ -37,6 +37,7 @@ export function splitMarkdownForDiscord(
 	text: string,
 	budget = DISCORD_MAX_MESSAGE_LEN,
 ): string[] {
+	if (budget <= 0) throw new RangeError(`splitMarkdownForDiscord: budget must be > 0 (got ${budget})`);
 	if (!text || text.trim() === "") return [];
 	const lines = text.split("\n");
 	while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();

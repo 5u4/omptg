@@ -24,6 +24,14 @@ import { scoped } from "../../logger.ts";
  *  hard send cap so a last appended status line has headroom. */
 const ACTIVITY_CHAR_CAP = 1800;
 const ACTIVITY_LINE_CAP = 20;
+/** Default `allowedMentions` applied to every send: don't parse any
+ *  mention type, and don't ping the user we're replying to. Tool args,
+ *  filenames, and assistant output can contain `@everyone`, `@here`,
+ *  `<@123>`, etc.; without this, those would notify real users. */
+const NO_MENTIONS = {
+	parse: [] as never[],
+	repliedUser: false,
+};
 /** Debounce window for activity-message edits. Coalesces tool start /
  *  end / preamble bursts into one `Message.edit` round-trip. Discord
  *  rate-limits message edits per channel; bursts at ≤250ms would
@@ -149,6 +157,7 @@ export class DiscordStreamer implements Streamer {
 			try {
 				await target.send({
 					content,
+					allowedMentions: NO_MENTIONS,
 					...(isFirst && this.replyTo !== undefined
 						? { reply: { messageReference: this.replyTo, failIfNotExists: false } }
 						: {}),
@@ -271,6 +280,7 @@ export class DiscordStreamer implements Streamer {
 			const sent = await target.send({
 				content: line,
 				flags: MessageFlags.SuppressNotifications,
+				allowedMentions: NO_MENTIONS,
 			});
 			const host: ActivityMessage = {
 				msg: sent,
@@ -380,7 +390,7 @@ export class DiscordStreamer implements Streamer {
 			const target = await this.target();
 			const chunks = splitMarkdownForDiscord(body);
 			for (const content of chunks) {
-				await target.send({ content });
+				await target.send({ content, allowedMentions: NO_MENTIONS });
 			}
 		} catch (err) {
 			this.log.warn("replaceWith.send_failed", { err: errMsg(err) });
@@ -389,7 +399,15 @@ export class DiscordStreamer implements Streamer {
 
 	private target(): Promise<TextChannel | ThreadChannel> {
 		if (!this.targetPromise) {
-			this.targetPromise = resolveSendTarget(this.client, this.channelId, this.threadId);
+			// Cache the in-flight promise so concurrent callers share one
+			// `channels.fetch`. On failure, evict so subsequent sends can
+			// retry — a transient gateway error otherwise poisons the
+			// streamer for the rest of the turn.
+			const p = resolveSendTarget(this.client, this.channelId, this.threadId);
+			p.catch(() => {
+				if (this.targetPromise === p) this.targetPromise = null;
+			});
+			this.targetPromise = p;
 		}
 		return this.targetPromise;
 	}
