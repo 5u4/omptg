@@ -3,7 +3,7 @@
  *
  *   {
  *     "chats": {
- *       "<chat_id>": {
+ *       "<bridge>:<chat_id>": {
  *         "cwd": "/abs/path",
  *         "label?": "...",
  *         "added_at": "ISO",
@@ -15,9 +15,23 @@
  *   }
  *
  * Three-level cwd resolution: topic binding → group binding → default.
- * Forum topics are addressed by their `message_thread_id` (Telegram
- * forum supergroups only; threadId 1 is "General" which we treat as no
- * thread — same key as a non-forum supergroup).
+ * Forum topics / Discord threads are addressed by their bridge-native
+ * id stringified (Telegram: `message_thread_id`; Discord: thread
+ * snowflake). Telegram's "General" topic and non-forum supergroups are
+ * keyed without a topic (threadId = undefined).
+ *
+ * Keys are namespaced by bridge (`tg:`, `dc:`, `web:`) so a numeric
+ * Telegram chat id can't collide with a same-looking Discord snowflake
+ * inside the shared file. Callers do NOT build the prefix themselves —
+ * they pass raw ids into `ChatRegistry`, which delegates to
+ * `Bridge.bindingKey(chatId)` to produce the prefixed key. ChatStore
+ * itself is bridge-blind and just stores opaque string keys.
+ *
+ * Migration: files written before namespacing landed had bare numeric
+ * keys (Telegram was the only bridge that ever wrote bindings). On
+ * load, any key without a known `<scheme>:` prefix is rewritten as
+ * `tg:<key>` and the file is rewritten once. Idempotent: subsequent
+ * loads see the prefixed form and skip migration.
  *
  * Reads are cached in memory; writes go through `mkdir -p` + atomic
  * tmp-rename so a crash mid-write can't corrupt the file.
@@ -39,12 +53,12 @@ export interface TopicBinding {
 }
 
 export interface ChatBinding {
-	/** Group-level cwd binding. `null` means "no group binding" — the
-	 *  entry exists only because per-topic bindings live on it. */
+	/** May be `null` after a group-level `/unbind` on a chat that still
+	 *  has topic bindings — the entry survives so topics resolve, but
+	 *  group resolution falls through to the default. */
 	cwd: string | null;
 	label?: string;
 	added_at: string;
-	/** Per-topic overrides. Absent when no topic-level binding exists. */
 	topics?: Record<string, TopicBinding>;
 }
 
@@ -53,6 +67,15 @@ interface ChatStoreFile {
 }
 
 const DEFAULT_PATH = resolvePath(homedir(), ".omptg", "chats.json");
+
+/** Bridge prefixes recognized at load time. Anything else (i.e. a
+ *  bare numeric key from before namespacing) is migrated to `tg:`. */
+const KNOWN_PREFIXES = ["tg:", "dc:", "web:"] as const;
+
+function hasKnownPrefix(key: string): boolean {
+	for (const p of KNOWN_PREFIXES) if (key.startsWith(p)) return true;
+	return false;
+}
 
 /** Expand a leading `~` to the user's home directory. */
 export function expandHome(path: string): string {
@@ -76,12 +99,45 @@ export class ChatStore {
 			if (!parsed || typeof parsed !== "object" || !parsed.chats) {
 				return { chats: {} };
 			}
-			return parsed;
+			return this.migrate(parsed);
 		} catch {
 			// Corrupt file: don't overwrite, but don't crash either. Start
 			// empty in memory; next save will replace it.
 			return { chats: {} };
 		}
+	}
+
+	/** Rewrite any bare-numeric keys (legacy Telegram-only schema) as
+	 *  `tg:<id>`. If any rewrites happened, persist immediately so the
+	 *  file matches the in-memory shape on the next process boot. */
+	private migrate(parsed: ChatStoreFile): ChatStoreFile {
+		let mutated = false;
+		const next: Record<string, ChatBinding> = {};
+		for (const [k, v] of Object.entries(parsed.chats)) {
+			if (hasKnownPrefix(k)) {
+				next[k] = v;
+				continue;
+			}
+			const migrated = `tg:${k}`;
+			// Collision: a `tg:<id>` already exists alongside the bare
+			// `<id>`. The prefixed entry wins (it was written by a newer
+			// code path); the bare entry is dropped.
+			if (next[migrated] !== undefined || parsed.chats[migrated] !== undefined) {
+				mutated = true;
+				continue;
+			}
+			next[migrated] = v;
+			mutated = true;
+		}
+		if (mutated) {
+			this.data = { chats: next };
+			try { this.save(); } catch {
+				// Migration save best-effort: in-memory state is correct
+				// either way; the next successful write rewrites the file.
+			}
+			return this.data;
+		}
+		return { chats: next };
 	}
 
 	private save(): void {
@@ -93,15 +149,14 @@ export class ChatStore {
 		renameSync(tmp, this.path);
 	}
 
-	get(chatId: number | string): ChatBinding | undefined {
-		return this.data.chats[String(chatId)];
+	get(key: string): ChatBinding | undefined {
+		return this.data.chats[key];
 	}
 
 	set(
-		chatId: number | string,
+		key: string,
 		binding: Omit<ChatBinding, "added_at" | "topics"> & { added_at?: string },
 	): void {
-		const key = String(chatId);
 		const existing = this.data.chats[key];
 		this.data.chats[key] = {
 			...binding,
@@ -115,8 +170,7 @@ export class ChatStore {
 	/** Delete the group-level binding. Topic-level bindings on the same
 	 *  chat are PRESERVED — user set those explicitly, we don't infer
 	 *  intent to clear them from a group-level /unbind. */
-	delete(chatId: number | string): boolean {
-		const key = String(chatId);
+	delete(key: string): boolean {
 		const existing = this.data.chats[key];
 		if (!existing) return false;
 		if (existing.topics && Object.keys(existing.topics).length > 0) {
@@ -136,23 +190,25 @@ export class ChatStore {
 		return true;
 	}
 
+	/** All persisted binding keys, prefixed with their bridge scheme
+	 *  (e.g. `tg:-1001234567890`, `dc:123456789012345678`). Callers
+	 *  scoping to one bridge MUST filter by prefix. */
 	chatIds(): string[] {
 		return Object.keys(this.data.chats);
 	}
 
 	getTopic(
-		chatId: number | string,
+		key: string,
 		threadId: number | string,
 	): TopicBinding | undefined {
-		return this.data.chats[String(chatId)]?.topics?.[String(threadId)];
+		return this.data.chats[key]?.topics?.[String(threadId)];
 	}
 
 	setTopic(
-		chatId: number | string,
+		key: string,
 		threadId: number | string,
 		binding: Omit<TopicBinding, "added_at"> & { added_at?: string },
 	): void {
-		const key = String(chatId);
 		const tkey = String(threadId);
 		const existing = this.data.chats[key];
 		const entry: ChatBinding = existing
@@ -166,8 +222,7 @@ export class ChatStore {
 		this.save();
 	}
 
-	deleteTopic(chatId: number | string, threadId: number | string): boolean {
-		const key = String(chatId);
+	deleteTopic(key: string, threadId: number | string): boolean {
 		const tkey = String(threadId);
 		const existing = this.data.chats[key];
 		if (!existing?.topics || !(tkey in existing.topics)) return false;
@@ -183,22 +238,22 @@ export class ChatStore {
 		return true;
 	}
 
-	topicIds(chatId: number | string): string[] {
-		const entry = this.data.chats[String(chatId)];
+	topicIds(key: string): string[] {
+		const entry = this.data.chats[key];
 		return entry?.topics ? Object.keys(entry.topics) : [];
 	}
 
-	/** Three-level cwd resolution: topic > group > default.
+	/** Three-level cwd resolution: topic > group > undefined.
 	 *  Returns undefined if no binding exists at any level. */
 	resolveCwd(
-		chatId: number | string,
+		key: string,
 		threadId: number | string | undefined,
 	): string | undefined {
 		if (threadId !== undefined) {
-			const t = this.getTopic(chatId, threadId);
+			const t = this.getTopic(key, threadId);
 			if (t) return t.cwd;
 		}
-		const g = this.get(chatId);
+		const g = this.get(key);
 		if (g && g.cwd) return g.cwd;
 		return undefined;
 	}

@@ -14,6 +14,8 @@ import { ChatRegistry } from "./chat.ts";
 import { ChatStore } from "./chat-store.ts";
 import { installDiscordMessageHandler } from "./handlers/discord/message.ts";
 import { installDiscordInteractionHandler } from "./handlers/discord/interaction.ts";
+import { installDiscordCommandHandler } from "./handlers/discord/commands.ts";
+import { registerSlashCommands } from "./bridge/discord/registration.ts";
 import { scoped } from "./logger.ts";
 
 const log = scoped("discord-main");
@@ -53,6 +55,7 @@ const TOKEN = required("DISCORD_BOT_TOKEN");
 const DEFAULT_CWD = resolveDefaultCwd();
 const ALLOWED_GUILDS = csvSet("DISCORD_ALLOWED_GUILDS");
 const ALLOWED_CHANNELS = csvSet("DISCORD_ALLOWED_CHANNELS");
+const DEV_GUILDS = csvSet("DISCORD_DEV_GUILDS");
 
 const client = new Client({
 	intents: [
@@ -81,12 +84,28 @@ installDiscordInteractionHandler({
 	allowedGuilds: ALLOWED_GUILDS,
 });
 
+installDiscordCommandHandler({
+	client,
+	registry,
+	defaultCwd: DEFAULT_CWD,
+	allowedChannels: ALLOWED_CHANNELS,
+	allowedGuilds: ALLOWED_GUILDS,
+});
+
 client.once(Events.ClientReady, c => {
 	log.info("ready", {
 		user: c.user.tag,
 		default_cwd: DEFAULT_CWD,
 		allowed_guilds: [...ALLOWED_GUILDS],
 		allowed_channels: [...ALLOWED_CHANNELS],
+		dev_guilds: [...DEV_GUILDS],
+	});
+	// Register slash commands after login so client.application.id resolves.
+	// Guild-scoped (instant) when DISCORD_DEV_GUILDS is set, otherwise
+	// global (up to 1h propagation). Failure here is non-fatal: existing
+	// commands keep working with the previously-registered definitions.
+	void registerSlashCommands(client, DEV_GUILDS).catch(err => {
+		log.error("register.failed", { err: String(err) });
 	});
 });
 
