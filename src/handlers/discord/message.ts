@@ -3,7 +3,9 @@
  *
  * - Top-level channel message → auto-create a thread off it, echo the
  *   message inside the new thread.
- * - Message inside an existing bot-owned thread → echo it back in-thread.
+ * - Message inside an allowlisted parent channel's thread → echo it
+ *   back in-thread (no bot-ownership check yet; the channel allowlist
+ *   is the access control for v1).
  *
  * Agent wiring lands in phase 5; this handler only proves the routing.
  */
@@ -39,7 +41,7 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 				if (allowedChannels.size > 0 && !allowedChannels.has(parentId)) return;
 				// Route into the thread's session; echo for phase 2.
 				registry.get(parentId, ch.id);
-				await ch.send(msg.content || "(empty)");
+				await ch.send(echoBody(msg.content));
 				return;
 			}
 
@@ -63,9 +65,20 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 				});
 			}
 			registry.get(ch.id, thread.id);
-			await thread.send(msg.content || "(empty)");
+			await thread.send(echoBody(msg.content));
 		} catch (err) {
 			log.error("messageCreate.error", { err: String(err) });
 		}
 	});
+}
+
+/** Discord caps message content at 2000 characters and rejects sends
+ *  past it. Phase 2 truncates rather than splitting so a long user
+ *  message still produces a visible echo instead of vanishing into the
+ *  catch block. Phase 3's `splitMarkdownForDiscord` will replace this
+ *  along with the streamer's matching head-truncate. */
+function echoBody(content: string): string {
+	if (!content) return "(empty)";
+	if (content.length <= 2000) return content;
+	return `${content.slice(0, 1997)}...`;
 }

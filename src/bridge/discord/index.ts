@@ -26,12 +26,13 @@ import { DiscordTyping } from "./typing.ts";
 
 const DISCORD_SYSTEM_BLOCK = [
 	"You are talking through a Discord bot.",
-	"Discord supports full GitHub-flavored markdown including fenced code",
-	"blocks with language tags, **bold**, *italic*, `inline code`, lists,",
-	"and links. There are NO MarkdownV2 escape rules — write markdown",
-	"normally.",
-	"Per-message hard cap is 2000 characters; the bridge will split long",
-	"replies on safe boundaries but you should prefer concise prose.",
+	"Discord supports full GitHub-flavored markdown: fenced code blocks",
+	"with language tags, **bold**, *italic*, `inline code`, lists, and",
+	"links. Write markdown normally — no escaping required.",
+	"Per-message hard cap is 2000 characters. Phase 2 will truncate",
+	"replies that exceed the cap; keep individual replies concise and",
+	"split your own output into multiple shorter messages when you have",
+	"a lot to say.",
 ].join("\n");
 
 export interface DiscordRouteIds {
