@@ -484,6 +484,14 @@ export class ChatSession {
 		return this.ui.pending();
 	}
 
+	/** Direct access to the bridge-side `InteractiveUI`. Discord needs this
+	 *  to invoke `showModal` on the originating interaction (modals can
+	 *  only open in response to an interaction, not unilaterally). Other
+	 *  call sites SHOULD prefer `resolvePending` / `pendingUi`. */
+	uiBridge(): InteractiveUI {
+		return this.ui;
+	}
+
 	private handleEvent(event: AgentSessionEvent): void {
 		const s = this.streamer;
 		switch (event.type) {
@@ -882,6 +890,14 @@ export class ChatRegistry {
 			this.chats.set(k, chat);
 		}
 		return chat;
+	}
+
+	/** Lookup without lazy-creating. Discord's interactionCreate uses
+	 *  this to bail on stale taps (leftover buttons after a bot restart)
+	 *  without paying the cost of constructing a fresh ChatSession +
+	 *  AgentSession just to reply "expired". */
+	peek(chatId: ChatId, threadId?: number | string): ChatSession | undefined {
+		return this.chats.get(this.key(chatId, threadId));
 	}
 
 	all(): ChatSession[] {

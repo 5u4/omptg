@@ -13,6 +13,7 @@ import { DiscordBridge } from "./bridge/discord/index.ts";
 import { ChatRegistry } from "./chat.ts";
 import { ChatStore } from "./chat-store.ts";
 import { installDiscordMessageHandler } from "./handlers/discord/message.ts";
+import { installDiscordInteractionHandler } from "./handlers/discord/interaction.ts";
 import { scoped } from "./logger.ts";
 
 const log = scoped("discord-main");
@@ -67,6 +68,13 @@ const bridge = new DiscordBridge(client);
 const registry = new ChatRegistry(bridge, DEFAULT_CWD, chatStore);
 
 installDiscordMessageHandler({
+	client,
+	registry,
+	allowedChannels: ALLOWED_CHANNELS,
+	allowedGuilds: ALLOWED_GUILDS,
+});
+
+installDiscordInteractionHandler({
 	client,
 	registry,
 	allowedChannels: ALLOWED_CHANNELS,
