@@ -121,7 +121,26 @@ export class ChatSession {
 	private firstUserText: string | undefined;
 	/** Set once we've attempted (or completed) title generation for the
 	 *  current session; cleared whenever session is recreated. */
-	private titleAttempted = false;
+	private _titleAttempted = false;
+	/** Bridge-supplied callback fired whenever the session's title
+	 *  changes — auto-generation after the first turn, manual `setTitle`,
+	 *  or `regenerateTitle`. Multi-shot: bridges that want a one-shot
+	 *  effect should latch in their own state, or check `titleAttempted`
+	 *  to skip installation entirely for sessions that already named.
+	 *
+	 *  Used by the Discord bridge to rename the thread; other bridges
+	 *  leave this unset. Both synchronous throws and rejected promises
+	 *  (for `async` callbacks) are caught and logged inside the title
+	 *  path — they never crash the turn. */
+	onTitleGenerated?: (title: string) => void | Promise<void>;
+
+	/** Has the auto-titler run for this session? `true` after the first
+	 *  successful (or skipped/failed) attempt, or immediately when a
+	 *  resumed session already had a name. Bridges check this to decide
+	 *  whether installing `onTitleGenerated` would do anything. */
+	get titleAttempted(): boolean {
+		return this._titleAttempted;
+	}
 	/** Latched on first ensure() call (per chat lifetime, not per session).
 	 *  Prevents re-running auto-resume after the user explicitly /new'd
 	 *  away from the recovered session — we only try once on cold boot. */
@@ -360,7 +379,7 @@ export class ChatSession {
 		this.streamer = undefined;
 		this.firstUserText = undefined;
 		this.pendingAssistantText = undefined;
-		this.titleAttempted = false;
+		this._titleAttempted = false;
 	}
 
 	private async createFresh(): Promise<AgentSession> {
@@ -411,7 +430,7 @@ export class ChatSession {
 			);
 		}
 		// Resuming a session preloads sessionName; don't try to generate again.
-		this.titleAttempted = Boolean(session.sessionName);
+		this._titleAttempted = Boolean(session.sessionName);
 		this.firstUserText = undefined;
 		this.pendingAssistantText = undefined;
 		this.log.info("session.attached", {
@@ -694,10 +713,10 @@ export class ChatSession {
 		// Don't overwrite a name that already exists (loaded from a resumed
 		// session or set by `/name` if we add that later).
 		if (session.sessionName) {
-			this.titleAttempted = true;
+			this._titleAttempted = true;
 			return;
 		}
-		this.titleAttempted = true;
+		this._titleAttempted = true;
 		const log = this.log;
 		void (async () => {
 			try {
@@ -714,10 +733,33 @@ export class ChatSession {
 				}
 				const ok = await session.setSessionName(title, "auto");
 				log.info("title.set", { title, ok });
+				if (ok) this.fireOnTitleGenerated(title);
 			} catch (err) {
 				log.warn("title.failed", { err: String(err) });
 			}
 		})();
+	}
+
+	/** Invoke the bridge-supplied `onTitleGenerated` callback. Catches
+	 *  both synchronous throws and rejected promises (the type allows
+	 *  `async` callbacks via `Promise<void>` return) so a misbehaving
+	 *  bridge can't escape the title path — which runs inside fire-and-
+	 *  forget IIFEs and async setters whose rejections would otherwise
+	 *  be unhandled. */
+	private fireOnTitleGenerated(title: string): void {
+		const cb = this.onTitleGenerated;
+		if (!cb) return;
+		const log = this.log;
+		try {
+			const ret = cb(title);
+			if (ret && typeof (ret as Promise<unknown>).catch === "function") {
+				(ret as Promise<unknown>).catch(err => {
+					log.warn("title.callback_failed", { err: String(err) });
+				});
+			}
+		} catch (err) {
+			log.warn("title.callback_failed", { err: String(err) });
+		}
 	}
 
 	/** Explicit user-supplied title. Persists to the session file as
@@ -730,7 +772,10 @@ export class ChatSession {
 		this.log.info("title.user_set", { title: name, ok });
 		// Treat a successful manual title as "we have a name now" so the
 		// auto-generator won't try to clobber it on the next turn.
-		if (ok) this.titleAttempted = true;
+		if (ok) {
+			this._titleAttempted = true;
+			this.fireOnTitleGenerated(name);
+		}
 		return ok;
 	}
 
@@ -756,8 +801,10 @@ export class ChatSession {
 			}
 			const ok = await session.setSessionName(title, "auto");
 			this.log.info("title.regen_set", { title, ok });
-			this.titleAttempted = true;
-			return ok ? title : undefined;
+			this._titleAttempted = true;
+			if (!ok) return undefined;
+			this.fireOnTitleGenerated(title);
+			return title;
 		} catch (err) {
 			this.log.warn("title.regen_failed", { err: String(err) });
 			return undefined;
