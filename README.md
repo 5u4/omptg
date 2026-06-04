@@ -2,8 +2,8 @@
 
 # omptg
 
-**Telegram bridge for [OMP](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent).**
-One Bun process, one `AgentSession` per chat, every interactive surface mapped to native Telegram UI.
+**Bridge for [OMP](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent) on Telegram, Discord, and the local Web UI.**
+One Bun process per transport, one `AgentSession` per chat, every interactive surface mapped to the native UI of each.
 
 [Quick start](#quick-start) · [Commands](#commands) · [Configuration](#configuration) · [Production](#production-pm2)
 
@@ -73,22 +73,64 @@ All variables live in `.env` (auto-loaded by Bun). See [`.env.example`](./.env.e
 
 **Optional:** `OMP_DEFAULT_CWD` · `OMPTG_STT_MODEL` · `OMPTG_STT_LANG` · `OMPTG_LOG_RETAIN_DAYS` · `OMPTG_LOG_COMPRESS_AFTER_DAYS`.
 
+## Bridges
+
+Three transports, three independent processes, one shared `~/.omptg/chats.json` for cwd bindings:
+
+- **Telegram** (`bun start`, env `TELEGRAM_*`) — DM + group + forum-topic routing, voice input, MarkdownV2 with the in-house escaper. The original surface; everything else is modeled after it.
+- **Discord** (`bun run start:discord`, env `DISCORD_*`) — one text channel ↔ one cwd, top-level messages auto-spawn a thread, each thread is an independent session. Slash commands register globally + per-dev-guild. See [Discord setup](#discord-setup) below.
+- **Web** (`bun run start:web`) — local Svelte UI for hands-on use without a chat client; useful when you want copy-paste and code rendering without Telegram/Discord caps.
+
+Each bridge namespaces its `ChatStore` keys (`tg:` / `dc:` / `web:`) so the three processes don't collide on the shared JSON file. Writes are reload-then-merge under atomic tmp-rename, so concurrent `/bind` calls from different bridges interleave safely: each process preserves entries written by the others between its load and its save.
+
+## Discord setup
+
+**1. Create the application.** [Discord developer portal](https://discord.com/developers/applications) → New Application → Bot → Reset Token. Paste into `DISCORD_BOT_TOKEN`.
+
+**2. Enable intents.** Same page, "Privileged Gateway Intents":
+
+- **MESSAGE CONTENT INTENT** — required, the bot can't read message text without it.
+
+Non-privileged intents (`Guilds`, `GuildMessages`, `GuildMessageReactions`) are requested automatically at gateway login.
+
+**3. Invite URL.** OAuth2 → URL Generator. Scopes: `bot`, `applications.commands`. Bot permissions: `View Channels`, `Send Messages`, `Send Messages in Threads`, `Create Public Threads`, `Read Message History`, `Add Reactions`, `Use Slash Commands`. The portal builds the URL — open it, pick a guild, authorize.
+
+Equivalent permission bitfield for a hand-rolled URL: `311385197632` (`VIEW_CHANNEL` + `SEND_MESSAGES` + `SEND_MESSAGES_IN_THREADS` + `CREATE_PUBLIC_THREADS` + `READ_MESSAGE_HISTORY` + `ADD_REACTIONS` + `USE_APPLICATION_COMMANDS` — no `MANAGE_*` bits). Template:
+
+```
+https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&permissions=311385197632&scope=bot%20applications.commands
+```
+
+**4. Configure & boot.**
+
+```sh
+# fill DISCORD_BOT_TOKEN at minimum; DISCORD_ALLOWED_GUILDS recommended.
+# DISCORD_DEV_GUILDS = your test-server id → instant slash-command updates
+# while iterating (global registration takes up to 1h to propagate).
+bun run start:discord
+```
+
+Post any message in an allowed text channel — the bot auto-creates a thread, runs your prompt inside it, and every subsequent message in that thread routes to the same session. `/bind /abs/path` on the parent channel pins the cwd for every thread spawned underneath; `/bind` inside a specific thread overrides for that thread only.
+
 ## Production (PM2)
 
-`bun start` dies when your terminal closes. For real use, supervise with [PM2](https://pm2.keymetrics.io) — one config covers macOS launchd, Linux systemd, and Windows services.
+`bun start` dies when your terminal closes. For real use, supervise with [PM2](https://pm2.keymetrics.io) — one config covers macOS launchd, Linux systemd, and Windows services. The shipped `ecosystem.config.cjs` declares both `omptg` (Telegram) and `omptg-discord`; start whichever apply.
 
 ```sh
 bun install -g pm2          # or: brew install pm2 / npm i -g pm2
 
-bun run pm2:start           # pm2 start ecosystem.config.cjs
+bun run pm2:start           # pm2 start ecosystem.config.cjs (starts both apps)
 pm2 save                    # remember the running set across reboots
 pm2 startup                 # generate the OS autostart hook — run the printed sudo line once
 
-bun run pm2:logs            # live tail
-bun run pm2:restart         # apply code changes
-bun run pm2:stop
+pm2 logs                    # live tail of all apps
+pm2 restart omptg           # apply code changes to Telegram only
+pm2 restart omptg-discord   # ...or Discord only
+pm2 stop omptg-discord      # don't want Discord supervised? stop + delete it
 ```
 
-After `save` + `startup`, the bot survives logouts, reboots, and its own crashes (auto-restart, capped at 10 restarts within 10s windows).
+> **Upgrading from a pre-Phase-6 deployment?** PM2 log filenames now include the app name: `logs/pm2-out.log` → `logs/pm2-omptg-out.log` (and a new `pm2-omptg-discord-*.log` pair). The old files are orphaned, not deleted — `rm logs/pm2-{out,err}.log` once you've checked you don't need them.
 
-**Logs.** Structured JSONL in `logs/<date>.log` (one event per line, `jq`-friendly), rotated on each boot: gzipped after `OMPTG_LOG_COMPRESS_AFTER_DAYS` (default 7), deleted after `OMPTG_LOG_RETAIN_DAYS` (default 30). PM2's own `pm2-out.log` / `pm2-err.log` aren't managed by us — install [`pm2-logrotate`](https://github.com/keymetrics/pm2-logrotate) if you care.
+After `save` + `startup`, the bots survive logouts, reboots, and their own crashes (auto-restart, capped at 10 restarts within 10s windows). Telegram and Discord run as separate processes so a gateway flake on one doesn't impact the other.
+
+**Logs.** Structured JSONL in `logs/<date>.log` (one event per line, `jq`-friendly), rotated on each boot: gzipped after `OMPTG_LOG_COMPRESS_AFTER_DAYS` (default 7), deleted after `OMPTG_LOG_RETAIN_DAYS` (default 30). PM2's own `pm2-<app>-out.log` / `pm2-<app>-err.log` aren't managed by us — install [`pm2-logrotate`](https://github.com/keymetrics/pm2-logrotate) if you care.

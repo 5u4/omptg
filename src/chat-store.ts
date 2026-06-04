@@ -92,6 +92,22 @@ export function expandHome(path: string): string {
 
 export class ChatStore {
 	private data: ChatStoreFile;
+	/** Keys this process has mutated (set / delete / setTopic /
+	 *  deleteTopic / migration) and therefore owns on the next save.
+	 *  Untouched keys are re-read fresh from disk every save, so a
+	 *  concurrent process updating an existing key isn't clobbered by
+	 *  our stale in-memory copy.
+	 *
+	 *  Cleared after each successful save: subsequent writes restart
+	 *  the dirty set, so the next save again starts from the latest
+	 *  disk snapshot. */
+	private dirtyKeys = new Set<string>();
+	/** Keys this process has deliberately removed (delete / deleteTopic
+	 *  that cleared the whole chat / migration retiring a bare-numeric
+	 *  key). Suppressed in the save-time disk merge so a concurrent
+	 *  reader writing back its stale snapshot can't undo our /unbind.
+	 *  Process-local and persists for the lifetime of this instance. */
+	private tombstones = new Set<string>();
 
 	constructor(private readonly path: string = DEFAULT_PATH) {
 		this.data = this.load();
@@ -137,15 +153,17 @@ export class ChatStore {
 				continue;
 			}
 			const migrated = `tg:${k}`;
+			// Tombstone the bare key either way — it's been retired.
+			this.tombstones.add(k);
+			mutated = true;
 			// Collision: a `tg:<id>` already exists alongside the bare
 			// `<id>`. The prefixed entry wins (it was written by a newer
 			// code path); the bare entry is dropped.
 			if (next[migrated] !== undefined || parsed.chats[migrated] !== undefined) {
-				mutated = true;
 				continue;
 			}
 			next[migrated] = v;
-			mutated = true;
+			this.dirtyKeys.add(migrated);
 		}
 		if (mutated) {
 			this.data = { chats: next };
@@ -158,13 +176,71 @@ export class ChatStore {
 		return { chats: next };
 	}
 
+
+	/** Atomic write-through with cross-process awareness. Conflict model:
+	 *
+	 *   - Start from the latest on-disk snapshot (the source of truth
+	 *     for anything we haven't touched).
+	 *   - Overlay only `dirtyKeys` from in-memory `this.data` — these
+	 *     are the keys this process actually mutated since the last
+	 *     save and therefore owns.
+	 *   - Apply `tombstones` as deletions so a stale writeback by
+	 *     another process can't resurrect a key we removed.
+	 *
+	 *  In practice each bridge owns a disjoint key prefix (`tg:`/`dc:`/
+	 *  `web:`) so cross-process writes to the same key don't happen.
+	 *  The dirty model still matters for the entries a process reads
+	 *  from another bridge's prefix at boot: without it, an unrelated
+	 *  /bind here would write our stale copy back over the other
+	 *  bridge's fresh update.
+	 *
+	 *  Dirty/tombstone sets are cleared after a successful save so the
+	 *  next save again starts from the latest disk snapshot — without
+	 *  this, a key written once would stay "owned" forever and the
+	 *  cross-process freshness for that key would be lost. */
 	private save(): void {
 		mkdirSync(dirname(this.path), { recursive: true });
+		const merged = this.readDisk()?.chats ?? {};
+		for (const k of this.dirtyKeys) {
+			const local = this.data.chats[k];
+			if (local !== undefined) merged[k] = local;
+		}
+		for (const k of this.tombstones) {
+			delete merged[k];
+		}
 		const tmp = `${this.path}.tmp.${process.pid}`;
-		writeFileSync(tmp, `${JSON.stringify(this.data, null, 2)}\n`, {
+		writeFileSync(tmp, `${JSON.stringify({ chats: merged }, null, 2)}\n`, {
 			mode: 0o600,
 		});
 		renameSync(tmp, this.path);
+		// Sync in-memory state to what we just wrote, then clear dirty
+		// markers. Tombstones survive: an unbind is permanent intent
+		// that must keep vetoing future stale writebacks for this
+		// process's lifetime (clearing them would let a concurrent
+		// writeback resurrect the key after our next save).
+		this.data = { chats: merged };
+		this.dirtyKeys.clear();
+	}
+
+	/** Mirror of `load()` minus the migration step. Migration runs once
+	 *  per process at construction; on a write-time reload we trust
+	 *  whatever is on disk (any other process running this code already
+	 *  migrated, and a hand-edit between then and now would surface as
+	 *  an unmigrated bare-numeric key the next time we boot). */
+	private readDisk(): ChatStoreFile | undefined {
+		if (!existsSync(this.path)) return undefined;
+		try {
+			const raw = readFileSync(this.path, "utf8");
+			const parsed = JSON.parse(raw) as ChatStoreFile;
+			if (!parsed || typeof parsed !== "object"
+				|| !parsed.chats || typeof parsed.chats !== "object" || Array.isArray(parsed.chats)
+			) {
+				return undefined;
+			}
+			return parsed;
+		} catch {
+			return undefined;
+		}
 	}
 
 	get(key: string): ChatBinding | undefined {
@@ -182,6 +258,7 @@ export class ChatStore {
 			// Preserve any topic-level bindings on a group-level overwrite.
 			...(existing?.topics ? { topics: existing.topics } : {}),
 		};
+		this.dirtyKeys.add(key);
 		this.save();
 	}
 
@@ -200,10 +277,12 @@ export class ChatStore {
 				added_at: existing.added_at,
 				topics: existing.topics,
 			};
+			this.dirtyKeys.add(key);
 			this.save();
 			return true;
 		}
 		delete this.data.chats[key];
+		this.tombstones.add(key);
 		this.save();
 		return true;
 	}
@@ -237,6 +316,7 @@ export class ChatStore {
 			added_at: binding.added_at ?? new Date().toISOString(),
 		};
 		this.data.chats[key] = entry;
+		this.dirtyKeys.add(key);
 		this.save();
 	}
 
@@ -249,8 +329,10 @@ export class ChatStore {
 		// garbage-collect it to keep the file tidy.
 		if (!existing.cwd && Object.keys(existing.topics).length === 0) {
 			delete this.data.chats[key];
-		} else if (Object.keys(existing.topics).length === 0) {
-			delete existing.topics;
+			this.tombstones.add(key);
+		} else {
+			if (Object.keys(existing.topics).length === 0) delete existing.topics;
+			this.dirtyKeys.add(key);
 		}
 		this.save();
 		return true;

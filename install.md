@@ -112,6 +112,14 @@ Stop here and present the user with this exact checklist (translate to their lan
 
 **D. (Optional) Voice input.** If you want to send Telegram voice notes to the bot, install `ffmpeg` and `uv` (<https://github.com/astral-sh/uv>) — that's the whole setup, no config. The first voice message lazily bootstraps a whisper venv under `~/.omptg/whisper-venv/`. Skipping this now costs nothing: install the two binaries any time later and the next voice message just works. Text-only users can ignore.
 
+**E. (Optional) Discord bridge.** omptg can also run on Discord side-by-side with Telegram (separate process, shared `~/.omptg/chats.json`). If you want it:
+1. Create an application at <https://discord.com/developers/applications>, add a Bot, click **Reset Token**, copy the token.
+2. On the same page enable the **MESSAGE CONTENT INTENT** (privileged).
+3. OAuth2 → URL Generator → scopes `bot` + `applications.commands`, permissions `View Channels`, `Send Messages`, `Send Messages in Threads`, `Create Public Threads`, `Read Message History`, `Add Reactions`, `Use Slash Commands`. Open the generated URL, pick your server, authorize.
+4. Paste the token into `DISCORD_BOT_TOKEN` in `.env` (and optionally fill `DISCORD_ALLOWED_GUILDS` / `DISCORD_ALLOWED_CHANNELS` / `DISCORD_DEV_GUILDS` — see inline comments). Boot with `bun run start:discord`.
+
+Skip entirely if Discord isn't part of your setup — the Telegram process ignores all `DISCORD_*` vars.
+
 When you return with the values from A and B, paste them and I will:
 1. Write them into `.env` (`TELEGRAM_BOT_TOKEN=<from A>`, `TELEGRAM_ALLOWED_CHATS=<from B>`).
 2. Start the bot with `bun start`.

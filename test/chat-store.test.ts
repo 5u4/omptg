@@ -342,3 +342,72 @@ describe("ChatStore.resolveCwd — topic > group > undefined", () => {
 		expect(s.resolveCwd("tg:1", 5)).toBe("/topic");
 	});
 });
+
+describe("ChatStore — cross-process merge", () => {
+	test("save preserves entries written by another process between load and save", () => {
+		// Process A loads, then process B writes a different key, then
+		// process A writes its own key. Without reload+merge, A would
+		// clobber B's entry; with it, both survive.
+		const a = new ChatStore(storePath);
+		a.set("tg:1", { cwd: "/a" });
+
+		const b = new ChatStore(storePath);
+		b.set("dc:42", { cwd: "/b" });
+
+		a.set("tg:2", { cwd: "/a2" });
+
+		const reader = new ChatStore(storePath);
+		expect(reader.chatIds().sort()).toEqual(["dc:42", "tg:1", "tg:2"]);
+		expect(reader.get("dc:42")?.cwd).toBe("/b");
+	});
+
+	test("delete tombstone survives another process writing the key back to disk", () => {
+		// Real-world hazard: process A holds {tg:1, dc:2}. A deletes
+		// tg:1. Meanwhile process B (which still has tg:1 in its stale
+		// in-memory snapshot) writes back, restoring tg:1 on disk.
+		// When A next saves (e.g. for an unrelated /bind), its merge
+		// step sees tg:1 on disk again — the tombstone is what prevents
+		// the resurrected entry from being adopted back into A's data.
+		const a = new ChatStore(storePath);
+		a.set("tg:1", { cwd: "/a" });
+		a.set("dc:2", { cwd: "/b" });
+		a.delete("tg:1");
+
+		// Simulate process B writing back its stale view (which still
+		// contained tg:1) — direct on-disk mutation, bypassing any
+		// ChatStore instance, is the cleanest way to model "another
+		// process wrote this file between our delete and our next save".
+		const current = JSON.parse(readFileSync(storePath, "utf8"));
+		current.chats["tg:1"] = { cwd: "/resurrected", added_at: "2024-01-01T00:00:00.000Z" };
+		writeFileSync(storePath, JSON.stringify(current));
+
+		// A's next write must merge the on-disk state, but the
+		// tombstone for tg:1 must veto re-adoption.
+		a.set("tg:3", { cwd: "/c" });
+
+		const reader = new ChatStore(storePath);
+		expect(reader.chatIds().sort()).toEqual(["dc:2", "tg:3"]);
+		expect(reader.get("tg:1")).toBeUndefined();
+	});
+	test("untouched key updated by another process is not clobbered by our save", () => {
+		// A and B both hold {tg:1}. A doesn't touch tg:1. B updates
+		// tg:1's cwd. A then makes an unrelated change (writes tg:2).
+		// A's save must NOT write its stale tg:1 over B's update.
+		const a = new ChatStore(storePath);
+		a.set("tg:1", { cwd: "/original" });
+
+		// Simulate process B updating tg:1 directly on disk.
+		const current = JSON.parse(readFileSync(storePath, "utf8"));
+		current.chats["tg:1"] = { cwd: "/updated-by-b", added_at: "2024-01-01T00:00:00.000Z" };
+		writeFileSync(storePath, JSON.stringify(current));
+
+		// A writes an unrelated key. tg:1 was never re-mutated, so A's
+		// save should preserve disk's /updated-by-b instead of writing
+		// back the stale /original.
+		a.set("tg:2", { cwd: "/a2" });
+
+		const reader = new ChatStore(storePath);
+		expect(reader.get("tg:1")?.cwd).toBe("/updated-by-b");
+		expect(reader.get("tg:2")?.cwd).toBe("/a2");
+	});
+});

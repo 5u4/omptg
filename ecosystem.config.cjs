@@ -20,43 +20,58 @@ const HOME = homedir();
 
 module.exports = {
 	apps: [
-		{
+		makeApp({
 			name: "omptg",
-			script: "bun",
-			args: ["run", "src/main.ts"],
-			// Run from the directory holding this config so relative `src/`
-			// resolves and `.env` / `logs/` land alongside the code.
-			cwd: __dirname,
-
-			// Bun handles --watch itself; PM2 just supervises. Keep restart
-			// behavior simple: restart on crash, back off after repeated
-			// failures so a broken commit doesn't hammer the bot loop.
-			autorestart: true,
-			max_restarts: 10,
-			min_uptime: "10s",
-			restart_delay: 2000,
-
-			// Restart if memory blows past this. Long-lived AgentSession +
-			// streaming buffers shouldn't exceed this in normal use; if it
-			// does we'd rather restart than swap.
-			max_memory_restart: "1G",
-
-			// PM2 captures stdout/stderr separately. Our app already writes
-			// JSONL to ./logs/<date>.log, but mirror raw stdout/stderr too
-			// so `pm2 logs omptg` shows live tail without us re-reading
-			// the structured log file.
-			out_file: "logs/pm2-out.log",
-			error_file: "logs/pm2-err.log",
-			merge_logs: true,
-			log_date_format: "YYYY-MM-DD HH:mm:ss",
-
-			// Make user-local installs (uv, pipx, cargo) visible to spawned
-			// subprocesses. PM2 inherits the daemon's PATH, which on a fresh
-			// login shell usually omits ~/.local/bin.
-			env: {
-				NODE_ENV: "production",
-				PATH: [`${HOME}/.local/bin`, `${HOME}/.cargo/bin`, process.env.PATH].filter(Boolean).join(delimiter),
-			},
-		},
+			script: "src/main.ts",
+		}),
+		// Discord bridge runs as a separate process so a gateway
+		// disconnect / login flake doesn't take down Telegram. Both
+		// share ~/.omptg/chats.json — see README "running multiple
+		// bridges" for the keyspace story (tg: vs dc: prefixes).
+		makeApp({
+			name: "omptg-discord",
+			script: "src/discord-main.ts",
+		}),
 	],
 };
+
+function makeApp({ name, script }) {
+	return {
+		name,
+		script: "bun",
+		args: ["run", script],
+		// Run from the directory holding this config so relative `src/`
+		// resolves and `.env` / `logs/` land alongside the code.
+		cwd: __dirname,
+
+		// Bun handles --watch itself; PM2 just supervises. Keep restart
+		// behavior simple: restart on crash, back off after repeated
+		// failures so a broken commit doesn't hammer the bot loop.
+		autorestart: true,
+		max_restarts: 10,
+		min_uptime: "10s",
+		restart_delay: 2000,
+
+		// Restart if memory blows past this. Long-lived AgentSession +
+		// streaming buffers shouldn't exceed this in normal use; if it
+		// does we'd rather restart than swap.
+		max_memory_restart: "1G",
+
+		// PM2 captures stdout/stderr separately. Our app already writes
+		// JSONL to ./logs/<date>.log, but mirror raw stdout/stderr too
+		// so `pm2 logs <name>` shows live tail without us re-reading
+		// the structured log file.
+		out_file: `logs/pm2-${name}-out.log`,
+		error_file: `logs/pm2-${name}-err.log`,
+		merge_logs: true,
+		log_date_format: "YYYY-MM-DD HH:mm:ss",
+
+		// Make user-local installs (uv, pipx, cargo) visible to spawned
+		// subprocesses. PM2 inherits the daemon's PATH, which on a fresh
+		// login shell usually omits ~/.local/bin.
+		env: {
+			NODE_ENV: "production",
+			PATH: [`${HOME}/.local/bin`, `${HOME}/.cargo/bin`, process.env.PATH].filter(Boolean).join(delimiter),
+		},
+	};
+}
