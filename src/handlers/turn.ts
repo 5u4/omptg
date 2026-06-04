@@ -32,8 +32,12 @@ export interface TurnArgs {
 	/** Triggering-message id for the bridge to anchor system messages
 	 *  against (telegram: numeric `reply_parameters.message_id`;
 	 *  discord: snowflake string). Opaque to this layer; the transport
-	 *  decides how (or whether) to use it. */
-	replyTo: number | string;
+	 *  decides how (or whether) to use it. Optional: the Discord
+	 *  top-level-channel path spawns a thread off the triggering
+	 *  message, so re-replying to it from inside the thread would
+	 *  point at a message in a different channel and silently drop
+	 *  the reference. Omit `replyTo` there. */
+	replyTo?: number | string;
 	/** Tag for log scoping ("voice", "photo", "text"). */
 	source: "voice" | "photo" | "text";
 }

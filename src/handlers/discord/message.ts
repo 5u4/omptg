@@ -72,7 +72,7 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 				const parentId = ch.parentId;
 				if (!parentId) return;
 				if (allowedChannels.size > 0 && !allowedChannels.has(parentId)) return;
-				await dispatch(msg, parentId, ch);
+				await dispatch(msg, parentId, ch, msg.id);
 				return;
 			}
 
@@ -94,7 +94,15 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 
 			const threadName = msg.content.trim().slice(0, 80);
 			const thread = await spawnOrRecoverThread(msg, threadName);
-			await dispatch(msg, ch.id, thread);
+			// Top-level → spawned thread: omit replyTo. The first
+			// assistant chunk lives in the new thread, but `msg.id`
+			// references the triggering message in the parent channel.
+			// Discord rejects cross-channel replies (`failIfNotExists:
+			// false` then drops the reference silently), so the reply
+			// pip never renders. The thread itself is anchored on
+			// that message — the reply pip would be redundant even
+			// if it worked.
+			await dispatch(msg, ch.id, thread, undefined);
 		} catch (err) {
 			log.error("messageCreate.error", { err: String(err) });
 		}
@@ -103,7 +111,12 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 	/** Resolve the agent prompt (with optional reply-quote framing),
 	 *  materialize the per-thread ChatSession, install the auto-title
 	 *  rename hook on first turn, and hand off to runTurn. */
-	async function dispatch(msg: Message, channelId: string, thread: ThreadChannel): Promise<void> {
+	async function dispatch(
+		msg: Message,
+		channelId: string,
+		thread: ThreadChannel,
+		replyTo: string | undefined,
+	): Promise<void> {
 		const userText = msg.content;
 		// In-thread guard: same attachment-only logic as the top-level
 		// branch. We don't own thread creation here, so we just decline
@@ -163,7 +176,7 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 		void runTurn({
 			chat,
 			prompt,
-			replyTo: msg.id,
+			...(replyTo !== undefined ? { replyTo } : {}),
 			source: "text",
 		});
 	}
