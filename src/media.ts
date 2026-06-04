@@ -1,15 +1,17 @@
 /**
- * Helpers for downloading telegram-hosted media into the local image
- * cache so the agent's `inspect_image` tool (or anything else that takes
- * a filesystem path) can read it.
+ * Image cache for inspect_image's Hermes-style indirect-vision flow.
  *
- * Hermes-style flow:
- *   1. Telegram delivers file_id for a PhotoSize.
- *   2. We resolve the file URL via getFile(), fetch bytes, write to
- *      `~/.omptg/image-cache/<uuid>.<ext>`, return the local path.
- *   3. main.ts injects the path into the agent prompt as text
- *      ("[user attached image: /path/...]"); the main agent decides
- *      whether to call inspect_image with its own question.
+ * The agent's `inspect_image` tool takes a filesystem path; bridges
+ * download user-attached images, drop them in `~/.omptg/image-cache/`,
+ * and inject `[user attached image: <path>]` into the prompt so the
+ * main agent can hand the path to inspect_image with its own question.
+ *
+ * Two entry points:
+ *   - `downloadPhotoToCache(bot, fileId)` — telegram (needs the bot
+ *     token to resolve `getFile` → CDN URL, hence the grammY coupling).
+ *   - `cacheImageFromUrl(url, hint?)` — bridge-agnostic. Discord
+ *     attachment CDN URLs are pre-signed and need no auth, so the
+ *     caller just hands us the URL + optional content-type hint.
  *
  * Cache hygiene: prune the cache directory when it grows past
  * MAX_CACHE_BYTES, keeping the most recently modified files.
@@ -29,7 +31,15 @@ const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
 
 mkdirSync(CACHE_DIR, { recursive: true });
 
-/** Map telegram-served extension → standard mime. */
+/** Map standard mime → preferred extension. Bidirectional lookups go
+ *  through this single table so the URL path (extension-only) and the
+ *  Discord path (content-type-first) stay in sync. */
+const MIME_TO_EXT: Record<string, string> = {
+	"image/jpeg": ".jpg",
+	"image/png": ".png",
+	"image/webp": ".webp",
+	"image/gif": ".gif",
+};
 const EXT_TO_MIME: Record<string, string> = {
 	".jpg": "image/jpeg",
 	".jpeg": "image/jpeg",
@@ -37,6 +47,51 @@ const EXT_TO_MIME: Record<string, string> = {
 	".webp": "image/webp",
 	".gif": "image/gif",
 };
+
+export interface CachedImage {
+	path: string;
+	mimeType: string;
+	bytes: number;
+}
+
+/**
+ * Download an arbitrary image URL into the local cache. Used by bridges
+ * whose CDN URLs need no auth header (Discord). `hint` lets the caller
+ * pass a known content-type (e.g. discord.js `Attachment.contentType`)
+ * so we don't have to guess from the URL when both sides already know.
+ *
+ * SECURITY: `url` is fetched with no host allowlist, no scheme check,
+ * and no redirect cap. The caller MUST guarantee the URL comes from a
+ * trusted source (e.g. an attachment object the platform issued itself
+ * — Discord's CDN, telegram's file API, etc.). Passing a user-typed
+ * URL through this function without first resolving + rejecting
+ * non-public hosts opens SSRF (e.g. `http://169.254.169.254/…`,
+ * `file://`, RFC1918 ranges).
+ *
+ * Throws on HTTP non-OK, oversized payload (> MAX_DOWNLOAD_BYTES), or
+ * unsupported mime (anything outside MIME_TO_EXT).
+ */
+export async function cacheImageFromUrl(
+	url: string,
+	hint?: { contentType?: string | null; filename?: string | null },
+): Promise<CachedImage> {
+	const res = await fetch(url);
+	if (!res.ok) throw new Error(`download ${url} → HTTP ${res.status}`);
+	const contentLength = Number(res.headers.get("content-length") ?? 0);
+	if (contentLength > MAX_DOWNLOAD_BYTES) {
+		throw new Error(`image too large: ${contentLength} > ${MAX_DOWNLOAD_BYTES}`);
+	}
+	const buf = Buffer.from(await res.arrayBuffer());
+	if (buf.length > MAX_DOWNLOAD_BYTES) {
+		throw new Error(`image too large: ${buf.length} > ${MAX_DOWNLOAD_BYTES}`);
+	}
+
+	// Resolve mime: prefer caller hint, then response header, then filename ext.
+	const headerType = res.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+	const mime = pickMime(hint?.contentType, headerType, hint?.filename);
+	if (!mime) throw new Error(`unsupported image type: ${hint?.contentType ?? headerType ?? "unknown"}`);
+	return writeCached(buf, mime);
+}
 
 /**
  * Download a telegram file to the local image cache. Returns the absolute
@@ -48,11 +103,7 @@ const EXT_TO_MIME: Record<string, string> = {
  *   - HTTP non-OK
  *   - oversized payload (> MAX_DOWNLOAD_BYTES)
  */
-export async function downloadPhotoToCache(bot: Bot, fileId: string): Promise<{
-	path: string;
-	mimeType: string;
-	bytes: number;
-}> {
+export async function downloadPhotoToCache(bot: Bot, fileId: string): Promise<CachedImage> {
 	const file = await bot.api.getFile(fileId);
 	if (!file.file_path) {
 		throw new Error(`getFile returned no file_path for ${fileId}`);
@@ -71,24 +122,47 @@ export async function downloadPhotoToCache(bot: Bot, fileId: string): Promise<{
 	if (buf.length > MAX_DOWNLOAD_BYTES) {
 		throw new Error(`image too large: ${buf.length} > ${MAX_DOWNLOAD_BYTES}`);
 	}
+	// Telegram serves photos as JPEG regardless of original; fall back to .jpg
+	// when the file_path extension isn't one we recognize.
+	const mime = pickMime(undefined, undefined, file.file_path) ?? "image/jpeg";
+	return writeCached(buf, mime);
+}
 
-	// Pick extension from telegram's file_path; default .jpg (telegram
-	// serves all photo sizes as JPEG anyway).
-	const dot = file.file_path.lastIndexOf(".");
-	const ext = (dot >= 0 ? file.file_path.slice(dot) : ".jpg").toLowerCase();
-	const safeExt = ext in EXT_TO_MIME ? ext : ".jpg";
+/** Resolve a canonical mime from any combination of caller hint,
+ *  HTTP content-type header, and filename. Returns undefined when none
+ *  of the sources map to a supported image type. */
+function pickMime(
+	hint: string | null | undefined,
+	header: string | null | undefined,
+	filename: string | null | undefined,
+): string | undefined {
+	for (const ct of [hint, header]) {
+		if (!ct) continue;
+		const norm = ct.split(";")[0]?.trim().toLowerCase();
+		if (norm && norm in MIME_TO_EXT) return norm;
+	}
+	if (filename) {
+		const dot = filename.lastIndexOf(".");
+		if (dot >= 0) {
+			const ext = filename.slice(dot).toLowerCase();
+			if (ext in EXT_TO_MIME) return EXT_TO_MIME[ext]!;
+		}
+	}
+	return undefined;
+}
 
-	const path = resolvePath(CACHE_DIR, `${randomUUID()}${safeExt}`);
+/** Write `buf` to the cache under a fresh uuid + extension derived from
+ *  `mime`, run a best-effort prune, and return the descriptor. */
+function writeCached(buf: Buffer, mime: string): CachedImage {
+	const ext = MIME_TO_EXT[mime] ?? ".jpg";
+	const path = resolvePath(CACHE_DIR, `${randomUUID()}${ext}`);
 	writeFileSync(path, buf);
-
-	// Best-effort prune; we run sync to keep ordering simple but skip on error.
 	try {
 		pruneCacheIfNeeded();
 	} catch {
 		// Pruning failure must not break the request.
 	}
-
-	return { path, mimeType: EXT_TO_MIME[safeExt]!, bytes: buf.length };
+	return { path, mimeType: mime, bytes: buf.length };
 }
 
 /**

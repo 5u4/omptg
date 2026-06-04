@@ -21,10 +21,11 @@
  * matches the Telegram handler's shape (handler returns quickly, error
  * reporting stays inside runTurn) so the two bridges read the same.
  */
-import type { Client, Message, ThreadChannel } from "discord.js";
+import type { Attachment, Client, Message, ThreadChannel } from "discord.js";
 import { ChannelType, Events } from "discord.js";
 import type { ChatRegistry } from "../../chat.ts";
 import { scoped } from "../../logger.ts";
+import { cacheImageFromUrl } from "../../media.ts";
 import { formatReplyPrompt, type ReplyContext } from "../../quote.ts";
 import { runTurn } from "../turn.ts";
 
@@ -81,18 +82,22 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 
 			// Top-level channel message.
 			//
-			// Attachment-only messages (no usable text) are the worst-of-
-			// both-worlds case: spawning a thread + then silently dropping
-			// the turn makes the bot look broken. v1 doesn't handle
-			// attachments at all (Phase 4.5), so refuse cleanly *before*
-			// the thread spawn instead. Reply to the original message so
-			// the user sees the explanation in the parent channel.
-			if (!msg.content.trim()) {
+			// Attachment-only messages with no usable image *and* no text
+			// are the worst-of-both-worlds case: spawning a thread + then
+			// silently dropping the turn makes the bot look broken.
+			// Refuse cleanly *before* the thread spawn instead. Reply to
+			// the original message so the user sees the explanation in
+			// the parent channel.
+			const topImages = pickImageAttachments(msg);
+			if (!msg.content.trim() && topImages.length === 0) {
 				await refuseAttachmentOnly(msg);
 				return;
 			}
 
-			const threadName = msg.content.trim().slice(0, 80);
+			// Prefer text for the thread name; fall back to a generic
+			// label when the user only sent images (Discord requires a
+			// non-empty thread name).
+			const threadName = (msg.content.trim() || "image").slice(0, 80);
 			const thread = await spawnOrRecoverThread(msg, threadName);
 			// Top-level → spawned thread: omit replyTo. The first
 			// assistant chunk lives in the new thread, but `msg.id`
@@ -102,7 +107,7 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 			// pip never renders. The thread itself is anchored on
 			// that message — the reply pip would be redundant even
 			// if it worked.
-			await dispatch(msg, ch.id, thread, undefined);
+			await dispatch(msg, ch.id, thread, undefined, topImages);
 		} catch (err) {
 			log.error("messageCreate.error", { err: String(err) });
 		}
@@ -116,18 +121,84 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 		channelId: string,
 		thread: ThreadChannel,
 		replyTo: string | undefined,
+		images?: Attachment[],
 	): Promise<void> {
 		const userText = msg.content;
-		// In-thread guard: same attachment-only logic as the top-level
-		// branch. We don't own thread creation here, so we just decline
-		// without spawning a turn — but still surface the explanation so
-		// the user understands why the bot went quiet in the thread.
-		if (!userText.trim()) {
+		// Re-derive image attachments for the in-thread path; the
+		// top-level path passes them in already. Either way:
+		// attachment-only + no images means the user uploaded
+		// something we can't ingest (video, file, etc.) — surface the
+		// explanation rather than going silent in the thread.
+		const imgAttachments = images ?? pickImageAttachments(msg);
+		if (!userText.trim() && imgAttachments.length === 0) {
 			await refuseAttachmentOnly(msg);
 			return;
 		}
 
-		let prompt = userText;
+		// Download every image to the local cache. We do them in
+		// parallel — typical Discord uploads are a handful of files
+		// and the CDN handles concurrent fetches well. On per-file
+		// failure (oversized, network blip, unsupported mime) we
+		// drop that one image, surface a notice, and continue with
+		// the rest; losing one attachment shouldn't tank the whole
+		// turn.
+		const cached = await Promise.all(imgAttachments.map(async a => {
+			try {
+				const out = await cacheImageFromUrl(a.url, {
+					contentType: a.contentType,
+					filename: a.name,
+				});
+				log.info("image.cached", {
+					channel: channelId,
+					path: out.path,
+					bytes: out.bytes,
+				});
+				return out.path;
+			} catch (err) {
+				log.warn("image.cache_failed", {
+					channel: channelId,
+					url: a.url,
+					err: String(err),
+				});
+				return undefined;
+			}
+		}));
+		const imagePaths = cached.filter((p): p is string => p !== undefined);
+
+		// All-failed guard. If the user posted images and no text, and
+		// every download failed (oversized / unsupported / CDN blip),
+		// the bot would otherwise hand the agent an empty prompt — same
+		// "bot looks broken" pathology the early attachment-only refuse
+		// gate was added to prevent. Telegram's photo handler surfaces
+		// download errors to the user the same way; mirror that. When
+		// the user also typed a caption we let the turn proceed: the
+		// caption alone is still a meaningful prompt, the partial
+		// failures are already logged at warn.
+		if (imgAttachments.length > 0 && imagePaths.length === 0 && !userText.trim()) {
+			try {
+				await msg.reply({
+					content: "❌ Couldn't ingest any of the attached images (oversized / unsupported / fetch failed). Check the logs for details.",
+					allowedMentions: { parse: [], repliedUser: false },
+				});
+			} catch (err) {
+				log.warn("image.all_failed_reply_failed", { err: String(err) });
+			}
+			return;
+		}
+		// Build the agent prompt. Mirrors handlers/photo.ts so the
+		// main agent sees the same `[user attached image: …]` framing
+		// regardless of bridge. When there's no caption, hand the
+		// agent an explicit sentinel so it knows the empty text is
+		// intentional (user uploaded image-only).
+		const composedText = imagePaths.length > 0
+			? [
+				...imagePaths.map(p => `[user attached image: ${p}]`),
+				"",
+				userText.trim() || "(no caption — describe or ask what they want)",
+			].join("\n")
+			: userText;
+
+		let prompt = composedText;
 		const refId = msg.reference?.messageId;
 		if (refId) {
 			try {
@@ -138,7 +209,7 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 					fromBot,
 					text: referenced.content,
 				};
-				prompt = formatReplyPrompt(ctx, userText);
+				prompt = formatReplyPrompt(ctx, composedText);
 			} catch (err) {
 				// Non-fatal: lose the quote framing but still run the turn
 				// with the raw text rather than dropping the user's message.
@@ -177,7 +248,11 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 			chat,
 			prompt,
 			...(replyTo !== undefined ? { replyTo } : {}),
-			source: "text",
+			// Source tag drives per-bridge log scoping in runTurn /
+			// turn.failed; an image-bearing dispatch should surface as
+			// a photo turn so per-source filtering during incident
+			// triage still works (matches handlers/photo.ts).
+			source: imagePaths.length > 0 ? "photo" : "text",
 		});
 	}
 }
@@ -201,7 +276,7 @@ async function spawnOrRecoverThread(msg: Message, name: string): Promise<ThreadC
 	}
 }
 
-/** Post the "attachments not supported yet" reply with mentions fully
+/** Post the "unsupported attachments" reply with mentions fully
  *  suppressed. Matches the convention used everywhere else in the
  *  Discord bridge (streamer / ui / system messages): user text and
  *  reply context can contain `@everyone`, `<@id>`, etc., and a system
@@ -209,10 +284,30 @@ async function spawnOrRecoverThread(msg: Message, name: string): Promise<ThreadC
 async function refuseAttachmentOnly(msg: Message): Promise<void> {
 	try {
 		await msg.reply({
-			content: "ℹ attachments aren't supported yet — please add a text message describing what you'd like.",
+			content: "ℹ I can only ingest text and image attachments — please add a message describing what you'd like.",
 			allowedMentions: { parse: [], repliedUser: false },
 		});
 	} catch (err) {
 		log.warn("attachment_only.reply_failed", { err: String(err) });
 	}
+}
+
+/** Filter `msg.attachments` to entries we can hand to the image cache.
+ *  Trust `contentType` first (Discord populates it for everything its
+ *  CDN scans), fall back to a known image extension on the filename
+ *  for the rare upload that arrives without a content-type.
+ *
+ *  Exported for tests; constructing a full Message mock just to
+ *  exercise this branch is more ceremony than it's worth. */
+export function pickImageAttachments(msg: Message): Attachment[] {
+	const out: Attachment[] = [];
+	for (const a of msg.attachments.values()) {
+		if (a.contentType?.toLowerCase().startsWith("image/")) {
+			out.push(a);
+			continue;
+		}
+		const name = a.name?.toLowerCase() ?? "";
+		if (/\.(jpe?g|png|webp|gif)$/.test(name)) out.push(a);
+	}
+	return out;
 }
