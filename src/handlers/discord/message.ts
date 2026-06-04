@@ -134,19 +134,23 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 		}
 
 		const chat = registry.get(channelId, thread.id);
-		// Install the rename hook only if the auto-titler hasn't already
-		// fired for this session — `titleAttempted` is true for resumed
-		// sessions (already named) and for sessions that have already
-		// produced a title in this process. Idempotent install: we
-		// overwrite the previous callback every turn so the most recent
-		// `thread` snowflake/handle wins (matters if the user moves the
-		// session across thread refetches via gateway reconnect).
+		// Install the rename hook on every turn dispatch, gated on
+		// `titleAttempted` to skip sessions that already had a name at
+		// boot (resumed) or generated one earlier in this process. The
+		// callback is multi-shot — it also fires on manual setTitle /
+		// regenerateTitle — but inside the gate the first auto-title
+		// will flip titleAttempted, so re-running this branch on later
+		// turns is a no-op. Re-installing every turn is intentional:
+		// the closure captures the most recent `thread` handle, so a
+		// gateway-driven refetch can't strand the callback on a stale
+		// ThreadChannel.
 		if (!chat.titleAttempted) {
 			chat.onTitleGenerated = title => {
-				// Discord caps channel/thread names at 100 chars and
-				// limits renames to 2 per 10min per thread. The titler
-				// fires at most once per ChatSession lifetime, so the
-				// rate limit is never reached.
+				// Discord limits to 2 thread renames per 10min per
+				// thread. Auto-title fires once; manual title /
+				// regenerate add to the budget. setName rejections
+				// (including 429 rate-limit) surface as the catch
+				// below and are logged, never crash the turn.
 				const name = title.slice(0, 100);
 				thread.setName(name, "omptg auto-title").catch(err => {
 					log.warn("thread.rename_failed", {

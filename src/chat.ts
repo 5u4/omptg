@@ -122,12 +122,17 @@ export class ChatSession {
 	/** Set once we've attempted (or completed) title generation for the
 	 *  current session; cleared whenever session is recreated. */
 	private _titleAttempted = false;
-	/** Bridge-supplied callback fired exactly once per ChatSession, when
-	 *  the auto-titler produces a name (or the user sets one manually).
+	/** Bridge-supplied callback fired whenever the session's title
+	 *  changes — auto-generation after the first turn, manual `setTitle`,
+	 *  or `regenerateTitle`. Multi-shot: bridges that want a one-shot
+	 *  effect should latch in their own state, or check `titleAttempted`
+	 *  to skip installation entirely for sessions that already named.
+	 *
 	 *  Used by the Discord bridge to rename the thread; other bridges
-	 *  leave this unset. Errors raised by the callback are caught and
-	 *  logged inside the title path — they never crash the turn. */
-	onTitleGenerated?: (title: string) => void;
+	 *  leave this unset. Both synchronous throws and rejected promises
+	 *  (for `async` callbacks) are caught and logged inside the title
+	 *  path — they never crash the turn. */
+	onTitleGenerated?: (title: string) => void | Promise<void>;
 
 	/** Has the auto-titler run for this session? `true` after the first
 	 *  successful (or skipped/failed) attempt, or immediately when a
@@ -735,17 +740,25 @@ export class ChatSession {
 		})();
 	}
 
-	/** Invoke the bridge-supplied `onTitleGenerated` callback. Wraps in a
-	 *  try/catch so a misbehaving bridge can't throw out of the title
-	 *  path (which runs inside fire-and-forget IIFEs and async setters
-	 *  whose rejections would be unhandled). */
+	/** Invoke the bridge-supplied `onTitleGenerated` callback. Catches
+	 *  both synchronous throws and rejected promises (the type allows
+	 *  `async` callbacks via `Promise<void>` return) so a misbehaving
+	 *  bridge can't escape the title path — which runs inside fire-and-
+	 *  forget IIFEs and async setters whose rejections would otherwise
+	 *  be unhandled. */
 	private fireOnTitleGenerated(title: string): void {
 		const cb = this.onTitleGenerated;
 		if (!cb) return;
+		const log = this.log;
 		try {
-			cb(title);
+			const ret = cb(title);
+			if (ret && typeof (ret as Promise<unknown>).catch === "function") {
+				(ret as Promise<unknown>).catch(err => {
+					log.warn("title.callback_failed", { err: String(err) });
+				});
+			}
 		} catch (err) {
-			this.log.warn("title.callback_failed", { err: String(err) });
+			log.warn("title.callback_failed", { err: String(err) });
 		}
 	}
 
