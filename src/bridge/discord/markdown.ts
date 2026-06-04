@@ -14,6 +14,8 @@
  * conversion pass.
  */
 
+import { fenceTables, neutralizeHorizontalRules } from "../../markdown.ts";
+
 /** Discord per-message hard cap. */
 export const DISCORD_MAX_MESSAGE_LEN = 2000;
 
@@ -33,7 +35,6 @@ const CLOSE_FENCE_COST = 4;
  * `openInfo`. This avoids emitting empty `` ```ts\n``` `` chunks when
  * a hard-split or flush boundary lands on bare fence chrome.
  */
-import { fenceTables, neutralizeHorizontalRules } from "../../markdown.ts";
 
 /**
  * Demote ATX headings deeper than H3 to bold lines. Discord renders
