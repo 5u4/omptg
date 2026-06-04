@@ -389,4 +389,25 @@ describe("ChatStore — cross-process merge", () => {
 		expect(reader.chatIds().sort()).toEqual(["dc:2", "tg:3"]);
 		expect(reader.get("tg:1")).toBeUndefined();
 	});
+	test("untouched key updated by another process is not clobbered by our save", () => {
+		// A and B both hold {tg:1}. A doesn't touch tg:1. B updates
+		// tg:1's cwd. A then makes an unrelated change (writes tg:2).
+		// A's save must NOT write its stale tg:1 over B's update.
+		const a = new ChatStore(storePath);
+		a.set("tg:1", { cwd: "/original" });
+
+		// Simulate process B updating tg:1 directly on disk.
+		const current = JSON.parse(readFileSync(storePath, "utf8"));
+		current.chats["tg:1"] = { cwd: "/updated-by-b", added_at: "2024-01-01T00:00:00.000Z" };
+		writeFileSync(storePath, JSON.stringify(current));
+
+		// A writes an unrelated key. tg:1 was never re-mutated, so A's
+		// save should preserve disk's /updated-by-b instead of writing
+		// back the stale /original.
+		a.set("tg:2", { cwd: "/a2" });
+
+		const reader = new ChatStore(storePath);
+		expect(reader.get("tg:1")?.cwd).toBe("/updated-by-b");
+		expect(reader.get("tg:2")?.cwd).toBe("/a2");
+	});
 });
