@@ -33,13 +33,104 @@ const CLOSE_FENCE_COST = 4;
  * `openInfo`. This avoids emitting empty `` ```ts\n``` `` chunks when
  * a hard-split or flush boundary lands on bare fence chrome.
  */
+import { fenceTables, neutralizeHorizontalRules } from "../../markdown.ts";
+
+/**
+ * Demote ATX headings deeper than H3 to bold lines. Discord renders
+ * `#`, `##`, `###` but treats `####`+ as literal text (the hashes show
+ * up in the message). Anything we rewrite must be fence-aware so a
+ * `#` comment in a shell snippet stays untouched.
+ */
+function demoteDeepHeadings(src: string): string {
+	const lines = src.split("\n");
+	let inFence = false;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (FENCE_RE.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) continue;
+		const m = /^(#{4,6})\s+(.+?)\s*#*\s*$/.exec(line);
+		if (m) lines[i] = `**${m[2]!}**`;
+	}
+	return lines.join("\n");
+}
+
+/**
+ * Rewrite GFM image syntax `![alt](url)` to a plain link `[alt](url)`.
+ * Discord ignores the `!` form entirely — the line renders as literal
+ * text — but a bare link auto-embeds the image when the URL points at
+ * an image asset. Empty alt falls back to the URL.
+ *
+ * Fence-aware so `![x](y)` inside a code block stays literal.
+ */
+function rewriteImages(src: string): string {
+	const lines = src.split("\n");
+	let inFence = false;
+	const IMG_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (FENCE_RE.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) continue;
+		lines[i] = line.replace(IMG_RE, (_m, alt: string, url: string) =>
+			alt.length > 0 ? `[${alt}](${url})` : url,
+		);
+	}
+	return lines.join("\n");
+}
+
+/**
+ * Rewrite GFM task list markers `- [ ]` / `- [x]` to unicode boxes.
+ * Discord renders the brackets as literal text, which looks broken.
+ * `☐` / `☑` survive any font and convey the same meaning. Ordered
+ * variants (`1. [ ]`) are handled too.
+ */
+function rewriteTaskLists(src: string): string {
+	const lines = src.split("\n");
+	let inFence = false;
+	const TASK_RE = /^(\s*(?:[-*+]|\d+\.)\s+)\[([ xX])\]\s+/;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (FENCE_RE.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) continue;
+		const m = TASK_RE.exec(line);
+		if (m) {
+			const checked = m[2] !== " ";
+			lines[i] = m[1]! + (checked ? "☑ " : "☐ ") + line.slice(m[0]!.length);
+		}
+	}
+	return lines.join("\n");
+}
+
 export function splitMarkdownForDiscord(
 	text: string,
 	budget = DISCORD_MAX_MESSAGE_LEN,
 ): string[] {
 	if (budget <= 0) throw new RangeError(`splitMarkdownForDiscord: budget must be > 0 (got ${budget})`);
 	if (!text || text.trim() === "") return [];
-	const lines = text.split("\n");
+	// Pre-split normalization. ORDER MATTERS:
+	//   1. fenceTables: wrap GFM tables in ``` so subsequent passes
+	//      treat their cells as code and leave them alone.
+	//   2. demoteDeepHeadings: rewrite H4+ to bold before anything else
+	//      inspects line shape.
+	//   3. rewriteImages / rewriteTaskLists: line-local rewrites that
+	//      are safe to run in any order, both fence-aware.
+	//   4. neutralizeHorizontalRules: kill bare `---`/`***`/`___` HR
+	//      lines that Discord renders as literal characters. Replaces
+	//      with `———` (em-dashes) for a similar visual.
+	let pre = fenceTables(text);
+	pre = demoteDeepHeadings(pre);
+	pre = rewriteImages(pre);
+	pre = rewriteTaskLists(pre);
+	pre = neutralizeHorizontalRules(pre);
+	const lines = pre.split("\n");
 	while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 	if (lines.length === 0) return [];
 
