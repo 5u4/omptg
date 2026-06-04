@@ -11,12 +11,24 @@
  * `messageCreate` is more ceremony than the branch warrants.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Attachment, Message } from "discord.js";
-import { pickImageAttachments } from "../src/handlers/discord/message.ts";
-import { cacheImageFromUrl } from "../src/media.ts";
+
+// Redirect the image cache to a per-run tempdir *before* importing
+// media.ts, otherwise writes pollute the dev's real ~/.omptg cache and
+// (in the rare case where it's > 200MB) pruning would evict unrelated
+// files. media.ts resolves the env var lazily on first call, so setting
+// it any time before the first cacheImageFromUrl invocation works —
+// doing it at module load keeps it ordered ahead of beforeAll.
+const CACHE_ROOT = mkdtempSync(join(tmpdir(), "omptg-image-cache-test-"));
+process.env["OMPTG_IMAGE_CACHE_DIR"] = CACHE_ROOT;
+
+const { pickImageAttachments } = await import("../src/handlers/discord/message.ts");
+const { cacheImageFromUrl } = await import("../src/media.ts");
 
 /** Minimal Attachment stand-in — `pickImageAttachments` only touches
  *  `contentType` and `name`. */
@@ -95,6 +107,25 @@ describe("cacheImageFromUrl", () => {
 					"content-length": String(60 * 1024 * 1024),
 				});
 				res.end(PNG_BYTES);
+			} else if (url.pathname === "/lying") {
+				// Server omits content-length but streams more bytes
+				// than the cap allows; the streaming guard must abort
+				// without buffering everything first.
+				res.writeHead(200, { "content-type": "image/png" });
+				const big = Buffer.alloc(1024 * 1024); // 1 MB chunk
+				let sent = 0;
+				const target = 60 * 1024 * 1024;
+				const pump = (): void => {
+					while (sent < target) {
+						sent += big.length;
+						if (!res.write(big)) {
+							res.once("drain", pump);
+							return;
+						}
+					}
+					res.end();
+				};
+				pump();
 			} else if (url.pathname === "/missing") {
 				res.writeHead(404);
 				res.end("nope");
@@ -116,6 +147,9 @@ describe("cacheImageFromUrl", () => {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		server.close(() => resolve());
 		await promise;
+		// Drop the per-run cache root so successive `bun test` runs
+		// don't accumulate empty directories under tmpdir.
+		try { rmSync(CACHE_ROOT, { recursive: true, force: true }); } catch { /* best effort */ }
 	});
 
 	test("downloads, writes bytes, and resolves mime from response header", async () => {
@@ -166,5 +200,13 @@ describe("cacheImageFromUrl", () => {
 
 	test("rejects payloads larger than MAX_DOWNLOAD_BYTES via content-length", async () => {
 		await expect(cacheImageFromUrl(`${base}/huge`)).rejects.toThrow(/image too large/);
+	});
+
+	test("rejects payloads larger than MAX_DOWNLOAD_BYTES via streaming cap when content-length is missing", async () => {
+		// Server omits content-length and streams 60MB of zeros — the
+		// pre-buffer header check passes (length unknown = 0), so the
+		// only thing that can save us is the streaming guard inside
+		// readBodyCapped.
+		await expect(cacheImageFromUrl(`${base}/lying`)).rejects.toThrow(/image too large/);
 	});
 });

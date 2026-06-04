@@ -137,11 +137,12 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 
 		// Download every image to the local cache. We do them in
 		// parallel — typical Discord uploads are a handful of files
-		// and the CDN handles concurrent fetches well. On per-file
-		// failure (oversized, network blip, unsupported mime) we
-		// drop that one image, surface a notice, and continue with
-		// the rest; losing one attachment shouldn't tank the whole
-		// turn.
+		// and the CDN handles concurrent fetches well. Per-image
+		// failure (oversized, network blip, unsupported mime) is
+		// logged at warn and the image is silently dropped from the
+		// prompt; losing one attachment shouldn't tank the whole
+		// turn. The all-failed case is caught by the explicit guard
+		// below so the user still gets feedback when nothing landed.
 		const cached = await Promise.all(imgAttachments.map(async a => {
 			try {
 				const out = await cacheImageFromUrl(a.url, {

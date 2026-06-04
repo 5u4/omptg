@@ -23,13 +23,25 @@ import { resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Bot } from "grammy";
 
-const CACHE_DIR = resolvePath(homedir(), ".omptg", "image-cache");
 /** Soft cap; pruning runs after every write that crosses this. */
 const MAX_CACHE_BYTES = 200 * 1024 * 1024; // 200 MB
 /** Hard per-file cap (decompression bombs / accidental huge forwards). */
 const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
 
-mkdirSync(CACHE_DIR, { recursive: true });
+/** Resolved on first use so tests can override via
+ *  `OMPTG_IMAGE_CACHE_DIR` before the first call. Module-load
+ *  resolution would freeze the path at import time and force every
+ *  test that touches media.ts to share `~/.omptg/image-cache` with
+ *  the dev's real cache. */
+let cacheDir: string | undefined;
+function getCacheDir(): string {
+	if (cacheDir) return cacheDir;
+	cacheDir = process.env["OMPTG_IMAGE_CACHE_DIR"]
+		? resolvePath(process.env["OMPTG_IMAGE_CACHE_DIR"])
+		: resolvePath(homedir(), ".omptg", "image-cache");
+	mkdirSync(cacheDir, { recursive: true });
+	return cacheDir;
+}
 
 /** Map standard mime → preferred extension. Bidirectional lookups go
  *  through this single table so the URL path (extension-only) and the
@@ -77,20 +89,52 @@ export async function cacheImageFromUrl(
 ): Promise<CachedImage> {
 	const res = await fetch(url);
 	if (!res.ok) throw new Error(`download ${url} → HTTP ${res.status}`);
+
+	// Early reject when the server actually tells us the size up front
+	// so we don't even start buffering. A spec-compliant CDN (Discord,
+	// telegram) always sends content-length; the streaming cap below
+	// covers servers that omit it or lie.
 	const contentLength = Number(res.headers.get("content-length") ?? 0);
 	if (contentLength > MAX_DOWNLOAD_BYTES) {
 		throw new Error(`image too large: ${contentLength} > ${MAX_DOWNLOAD_BYTES}`);
 	}
-	const buf = Buffer.from(await res.arrayBuffer());
-	if (buf.length > MAX_DOWNLOAD_BYTES) {
-		throw new Error(`image too large: ${buf.length} > ${MAX_DOWNLOAD_BYTES}`);
-	}
+
+	const buf = await readBodyCapped(res, MAX_DOWNLOAD_BYTES);
 
 	// Resolve mime: prefer caller hint, then response header, then filename ext.
 	const headerType = res.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
 	const mime = pickMime(hint?.contentType, headerType, hint?.filename);
 	if (!mime) throw new Error(`unsupported image type: ${hint?.contentType ?? headerType ?? "unknown"}`);
 	return writeCached(buf, mime);
+}
+
+/** Drain `res.body` into a buffer, aborting the stream the moment the
+ *  running total exceeds `max`. Falls back to `arrayBuffer()` only when
+ *  the response has no readable body (HEAD-like edge case) — in which
+ *  case the buffered result is bounded by the content-length check
+ *  the caller already ran. */
+async function readBodyCapped(res: Response, max: number): Promise<Buffer> {
+	if (!res.body) return Buffer.from(await res.arrayBuffer());
+	const reader = res.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			total += value.byteLength;
+			if (total > max) {
+				// Cancel the underlying connection so we stop pulling
+				// bytes from the socket immediately.
+				await reader.cancel().catch(() => {});
+				throw new Error(`image too large: > ${max}`);
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	return Buffer.concat(chunks, total);
 }
 
 /**
@@ -118,10 +162,7 @@ export async function downloadPhotoToCache(bot: Bot, fileId: string): Promise<Ca
 	if (contentLength > MAX_DOWNLOAD_BYTES) {
 		throw new Error(`image too large: ${contentLength} > ${MAX_DOWNLOAD_BYTES}`);
 	}
-	const buf = Buffer.from(await res.arrayBuffer());
-	if (buf.length > MAX_DOWNLOAD_BYTES) {
-		throw new Error(`image too large: ${buf.length} > ${MAX_DOWNLOAD_BYTES}`);
-	}
+	const buf = await readBodyCapped(res, MAX_DOWNLOAD_BYTES);
 	// Telegram serves photos as JPEG regardless of original; fall back to .jpg
 	// when the file_path extension isn't one we recognize.
 	const mime = pickMime(undefined, undefined, file.file_path) ?? "image/jpeg";
@@ -155,7 +196,7 @@ function pickMime(
  *  `mime`, run a best-effort prune, and return the descriptor. */
 function writeCached(buf: Buffer, mime: string): CachedImage {
 	const ext = MIME_TO_EXT[mime] ?? ".jpg";
-	const path = resolvePath(CACHE_DIR, `${randomUUID()}${ext}`);
+	const path = resolvePath(getCacheDir(), `${randomUUID()}${ext}`);
 	writeFileSync(path, buf);
 	try {
 		pruneCacheIfNeeded();
@@ -171,8 +212,9 @@ function writeCached(buf: Buffer, mime: string): CachedImage {
  * O(files in cache) but cache is bounded so this stays cheap.
  */
 function pruneCacheIfNeeded(): void {
-	const entries = readdirSync(CACHE_DIR).map(name => {
-		const full = resolvePath(CACHE_DIR, name);
+	const dir = getCacheDir();
+	const entries = readdirSync(dir).map(name => {
+		const full = resolvePath(dir, name);
 		const st = statSync(full);
 		return { full, size: st.size, mtime: st.mtimeMs };
 	});
