@@ -61,6 +61,10 @@ const DEFAULT_CWD = resolveDefaultCwd();
 const ALLOWED_GUILDS = csvSet("DISCORD_ALLOWED_GUILDS");
 const ALLOWED_CHANNELS = csvSet("DISCORD_ALLOWED_CHANNELS");
 const DEV_GUILDS = csvSet("DISCORD_DEV_GUILDS");
+/** Test-only: bot snowflakes whose messages bypass `msg.author.bot`
+ *  drop. Used by `scripts/discord-smoke.ts` so a second bot can drive
+ *  the handler end-to-end. Leave empty in production. */
+const TEST_BOT_AUTHORS = csvSet("DISCORD_TEST_BOT_AUTHORS");
 
 const client = new Client({
 	intents: [
@@ -80,6 +84,7 @@ installDiscordMessageHandler({
 	registry,
 	allowedChannels: ALLOWED_CHANNELS,
 	allowedGuilds: ALLOWED_GUILDS,
+	allowedBotAuthors: TEST_BOT_AUTHORS,
 });
 
 installDiscordInteractionHandler({

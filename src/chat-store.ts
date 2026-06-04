@@ -92,6 +92,13 @@ export function expandHome(path: string): string {
 
 export class ChatStore {
 	private data: ChatStoreFile;
+	/** Keys this process has deliberately removed (delete / deleteTopic
+	 *  that cleared the whole chat / migration retiring a bare-numeric
+	 *  key). The cross-process merge in `save()` must NOT resurrect
+	 *  these from disk, otherwise a concurrent reader writing back its
+	 *  stale snapshot would undo /unbind. Tombstones are process-local
+	 *  and persist for the lifetime of this instance. */
+	private tombstones = new Set<string>();
 
 	constructor(private readonly path: string = DEFAULT_PATH) {
 		this.data = this.load();
@@ -139,11 +146,14 @@ export class ChatStore {
 			const migrated = `tg:${k}`;
 			// Collision: a `tg:<id>` already exists alongside the bare
 			// `<id>`. The prefixed entry wins (it was written by a newer
-			// code path); the bare entry is dropped.
+			// code path); the bare entry is dropped. Tombstone the bare
+			// key so cross-process merge doesn't resurrect it.
 			if (next[migrated] !== undefined || parsed.chats[migrated] !== undefined) {
+				this.tombstones.add(k);
 				mutated = true;
 				continue;
 			}
+			this.tombstones.add(k);
 			next[migrated] = v;
 			mutated = true;
 		}
@@ -158,13 +168,54 @@ export class ChatStore {
 		return { chats: next };
 	}
 
+	/** Re-read the file, merge any entries written by other processes
+	 *  since we loaded, then atomically rewrite. Without the reload,
+	 *  two bridges sharing this file would last-writer-wins each
+	 *  other's bindings: process A loads {foo}, process B writes
+	 *  {foo,bar}, process A writes {foo} → bar lost. Reloading +
+	 *  merging is per-/bind overhead (one read + one write), which is
+	 *  negligible against the human typing speed of /bind invocations.
+	 *
+	 *  Conflict policy: entries we touched in memory win over disk for
+	 *  the same key (we know our intent; the other process may have a
+	 *  stale snapshot of the same key). Entries only on disk are
+	 *  preserved verbatim. */
 	private save(): void {
 		mkdirSync(dirname(this.path), { recursive: true });
+		const disk = this.readDisk();
+		if (disk) {
+			for (const [k, v] of Object.entries(disk.chats)) {
+				if (k in this.data.chats) continue;
+				if (this.tombstones.has(k)) continue;
+				this.data.chats[k] = v;
+			}
+		}
 		const tmp = `${this.path}.tmp.${process.pid}`;
 		writeFileSync(tmp, `${JSON.stringify(this.data, null, 2)}\n`, {
 			mode: 0o600,
 		});
 		renameSync(tmp, this.path);
+	}
+
+	/** Mirror of `load()` minus the migration step. Migration runs once
+	 *  per process at construction; on a write-time reload we trust
+	 *  whatever is on disk (any other process running this code already
+	 *  migrated, and a hand-edit between then and now would surface as
+	 *  an unmigrated bare-numeric key the next time we boot). */
+	private readDisk(): ChatStoreFile | undefined {
+		if (!existsSync(this.path)) return undefined;
+		try {
+			const raw = readFileSync(this.path, "utf8");
+			const parsed = JSON.parse(raw) as ChatStoreFile;
+			if (!parsed || typeof parsed !== "object"
+				|| !parsed.chats || typeof parsed.chats !== "object" || Array.isArray(parsed.chats)
+			) {
+				return undefined;
+			}
+			return parsed;
+		} catch {
+			return undefined;
+		}
 	}
 
 	get(key: string): ChatBinding | undefined {
@@ -204,6 +255,7 @@ export class ChatStore {
 			return true;
 		}
 		delete this.data.chats[key];
+		this.tombstones.add(key);
 		this.save();
 		return true;
 	}
@@ -249,6 +301,7 @@ export class ChatStore {
 		// garbage-collect it to keep the file tidy.
 		if (!existing.cwd && Object.keys(existing.topics).length === 0) {
 			delete this.data.chats[key];
+			this.tombstones.add(key);
 		} else if (Object.keys(existing.topics).length === 0) {
 			delete existing.topics;
 		}

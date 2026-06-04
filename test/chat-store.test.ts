@@ -342,3 +342,40 @@ describe("ChatStore.resolveCwd — topic > group > undefined", () => {
 		expect(s.resolveCwd("tg:1", 5)).toBe("/topic");
 	});
 });
+
+describe("ChatStore — cross-process merge", () => {
+	test("save preserves entries written by another process between load and save", () => {
+		// Process A loads, then process B writes a different key, then
+		// process A writes its own key. Without reload+merge, A would
+		// clobber B's entry; with it, both survive.
+		const a = new ChatStore(storePath);
+		a.set("tg:1", { cwd: "/a" });
+
+		const b = new ChatStore(storePath);
+		b.set("dc:42", { cwd: "/b" });
+
+		a.set("tg:2", { cwd: "/a2" });
+
+		const reader = new ChatStore(storePath);
+		expect(reader.chatIds().sort()).toEqual(["dc:42", "tg:1", "tg:2"]);
+		expect(reader.get("dc:42")?.cwd).toBe("/b");
+	});
+
+	test("delete survives concurrent reader's writeback (tombstone)", () => {
+		// A boots holding {tg:1}. B boots, sees {tg:1}, deletes it.
+		// A then writes {tg:2}. A's in-memory snapshot still has tg:1,
+		// but the tombstone path on B already ran. Cross-process merge
+		// can't revive a deletion the other process made *after* our
+		// load — same hazard remains — so this test instead verifies
+		// the local-tombstone behavior: a process's own delete is
+		// never undone by its own subsequent save's merge step.
+		const s = new ChatStore(storePath);
+		s.set("tg:1", { cwd: "/a" });
+		s.set("dc:2", { cwd: "/b" });
+		s.delete("tg:1");
+		s.set("tg:3", { cwd: "/c" });
+
+		const reader = new ChatStore(storePath);
+		expect(reader.chatIds().sort()).toEqual(["dc:2", "tg:3"]);
+	});
+});
