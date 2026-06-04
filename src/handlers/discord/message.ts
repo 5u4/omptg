@@ -72,7 +72,7 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 				const parentId = ch.parentId;
 				if (!parentId) return;
 				if (allowedChannels.size > 0 && !allowedChannels.has(parentId)) return;
-				await dispatch(msg, parentId, ch.id);
+				await dispatch(msg, parentId, ch);
 				return;
 			}
 
@@ -94,15 +94,16 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 
 			const threadName = msg.content.trim().slice(0, 80);
 			const thread = await spawnOrRecoverThread(msg, threadName);
-			await dispatch(msg, ch.id, thread.id);
+			await dispatch(msg, ch.id, thread);
 		} catch (err) {
 			log.error("messageCreate.error", { err: String(err) });
 		}
 	});
 
 	/** Resolve the agent prompt (with optional reply-quote framing),
-	 *  materialize the per-thread ChatSession, and hand off to runTurn. */
-	async function dispatch(msg: Message, channelId: string, threadId: string): Promise<void> {
+	 *  materialize the per-thread ChatSession, install the auto-title
+	 *  rename hook on first turn, and hand off to runTurn. */
+	async function dispatch(msg: Message, channelId: string, thread: ThreadChannel): Promise<void> {
 		const userText = msg.content;
 		// In-thread guard: same attachment-only logic as the top-level
 		// branch. We don't own thread creation here, so we just decline
@@ -132,7 +133,29 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 			}
 		}
 
-		const chat = registry.get(channelId, threadId);
+		const chat = registry.get(channelId, thread.id);
+		// Install the rename hook only if the auto-titler hasn't already
+		// fired for this session — `titleAttempted` is true for resumed
+		// sessions (already named) and for sessions that have already
+		// produced a title in this process. Idempotent install: we
+		// overwrite the previous callback every turn so the most recent
+		// `thread` snowflake/handle wins (matters if the user moves the
+		// session across thread refetches via gateway reconnect).
+		if (!chat.titleAttempted) {
+			chat.onTitleGenerated = title => {
+				// Discord caps channel/thread names at 100 chars and
+				// limits renames to 2 per 10min per thread. The titler
+				// fires at most once per ChatSession lifetime, so the
+				// rate limit is never reached.
+				const name = title.slice(0, 100);
+				thread.setName(name, "omptg auto-title").catch(err => {
+					log.warn("thread.rename_failed", {
+						thread_id: thread.id,
+						err: String(err),
+					});
+				});
+			};
+		}
 		void runTurn({
 			chat,
 			prompt,
