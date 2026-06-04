@@ -32,6 +32,21 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
+/** Bridge-supplied hook letting a ChatSession persist (and recover) the
+ *  OMP session id it's currently attached to, keyed by whatever the
+ *  bridge considers "one conversation" (Discord: thread snowflake).
+ *
+ *  When `get()` returns a non-undefined id, `ensure()` skips the
+ *  newest-wins auto-resume and tries to open that specific session
+ *  instead. Whenever a session is freshly created (or explicitly
+ *  resumed by path), ChatSession calls `set(newId)` so the next bot
+ *  restart resumes the same conversation rather than whichever
+ *  session happens to be newest on disk for the cwd. */
+export interface SessionPin {
+	get(): string | undefined;
+	set(sessionId: string): void;
+}
+
 export interface ChatSessionOptions {
 	chatId: ChatId;
 	cwd: string;
@@ -42,6 +57,11 @@ export interface ChatSessionOptions {
 	 *  group / forum General topic. Drives both ChatRegistry keying and
 	 *  outbound message routing (sendMessage / sendChatAction). */
 	threadId?: number | string;
+	/** Optional per-thread session pinning hook (see SessionPin). Bridges
+	 *  that treat each thread as one conversation (Discord) set this so
+	 *  bot restarts resume the right session; bridges that prefer cwd-
+	 *  level newest-wins resume (Telegram non-forum) leave it undefined. */
+	sessionPin?: SessionPin;
 }
 
 /**
@@ -111,6 +131,7 @@ export class ChatSession {
 	cwd: string;
 	private readonly transport: SessionTransport;
 	private readonly systemPromptAddendum: string;
+	private readonly sessionPin: SessionPin | undefined;
 	private readonly ui: InteractiveUI;
 	private readonly typing: Typing;
 	private session: AgentSession | undefined;
@@ -205,6 +226,7 @@ export class ChatSession {
 		this.typing = opts.transport.typing;
 		const suffix = opts.threadId !== undefined ? `:${opts.threadId}` : "";
 		this.log = scoped(`chat:${opts.chatId}${suffix}`);
+		this.sessionPin = opts.sessionPin;
 	}
 
 	get hasSession(): boolean {
@@ -289,12 +311,32 @@ export class ChatSession {
 
 	private async tryAutoResume(): Promise<AgentSession | undefined> {
 		try {
+			const pinnedId = this.sessionPin?.get();
+			// Pin-enabled bridge (e.g. Discord) with no pin set means
+			// "this thread is brand-new, no prior session to attach".
+			// Falling through to newest-wins would adopt some other
+			// thread's session in the same cwd — exactly the bug pinning
+			// exists to prevent.
+			if (this.sessionPin && !pinnedId) return undefined;
 			const sessions = await SessionManager.list(this.cwd);
 			if (sessions.length === 0) return undefined;
-			const newest = sessions.reduce((a, b) =>
-				a.modified.getTime() >= b.modified.getTime() ? a : b,
-			);
-			const manager = await SessionManager.open(newest.path);
+			const target = pinnedId
+				? sessions.find(s => s.id === pinnedId)
+				: sessions.reduce((a, b) =>
+					a.modified.getTime() >= b.modified.getTime() ? a : b,
+				);
+			if (!target) {
+				// Pin pointed at a session that no longer exists on disk
+				// (deleted, archived, or moved). Don't fall through to
+				// newest-wins — that's the bug we added pinning to fix.
+				// Returning undefined lets ensure() create a fresh
+				// session, and attach() will repoint the pin to the new id.
+				if (pinnedId) {
+					this.log.info("session.pin_miss", { pinned_id: pinnedId });
+				}
+				return undefined;
+			}
+			const manager = await SessionManager.open(target.path);
 			const created = await createAgentSession({
 				cwd: manager.getCwd(),
 				sessionManager: manager,
@@ -305,8 +347,9 @@ export class ChatSession {
 			this.attach(created.session, created.setToolUIContext, created.eventBus);
 			this.log.info("session.auto_resumed", {
 				session_id: created.session.sessionId,
-				path: newest.path,
+				path: target.path,
 				name: created.session.sessionName,
+				pinned: pinnedId !== undefined,
 			});
 			return created.session;
 		} catch (err) {
@@ -438,6 +481,21 @@ export class ChatSession {
 			cwd: this.cwd,
 			name: session.sessionName,
 		});
+		// Repoint the per-thread pin to the now-attached session id (no-op
+		// for bridges that didn't supply a pin). Centralized here so
+		// createFresh, resume, and tryAutoResume all keep the pin in sync
+		// without each having to remember to call it. Skip the write when
+		// the pin already matches — cold-boot pin-hit resumes would
+		// otherwise re-fsync the chats.json file once per thread for a
+		// value that didn't change.
+		if (this.sessionPin && session.sessionId
+			&& this.sessionPin.get() !== session.sessionId) {
+			try {
+				this.sessionPin.set(session.sessionId);
+			} catch (err) {
+				this.log.warn("session.pin_set_failed", { err: String(err) });
+			}
+		}
 	}
 
 	/** Send a user turn. Caller must wait via waitForIdle separately.
@@ -973,10 +1031,30 @@ export class ChatRegistry {
 				cwd: this.cwdFor(chatId, threadId),
 				transport: this.bridge.open(route),
 				systemPromptAddendum: this.bridge.systemPromptAddendum(),
+				sessionPin: this.makeSessionPin(chatId, threadId),
 			});
 			this.chats.set(k, chat);
 		}
 		return chat;
+	}
+
+	/** Build a SessionPin backed by the ChatStore topic binding for
+	 *  bridges that opt into per-thread session pinning. Returns
+	 *  undefined when pinning isn't applicable (bridge doesn't opt in,
+	 *  or this is a group-level / non-threaded chat) — ChatSession
+	 *  then falls back to its cwd-level newest-wins auto-resume. */
+	private makeSessionPin(
+		chatId: ChatId,
+		threadId: number | string | undefined,
+	): SessionPin | undefined {
+		if (!this.bridge.pinsSessions) return undefined;
+		if (threadId === undefined) return undefined;
+		const bindingKey = this.bkey(chatId);
+		const store = this.store;
+		return {
+			get: () => store.getTopic(bindingKey, threadId)?.sessionId,
+			set: id => store.setTopicSession(bindingKey, threadId, id),
+		};
 	}
 
 	/** Lookup without lazy-creating. Discord's interactionCreate uses

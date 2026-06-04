@@ -219,6 +219,11 @@ const cmdWhoami: Handler = async ctx => {
 	const topicBinding = threadId !== undefined
 		? registry.getTopicBinding(chatId, threadId)
 		: undefined;
+	// A topic entry with `cwd === null` is a session-pin-only stub
+	// created by ChatSession.attach() for Discord threads — it carries
+	// no user-visible /bind, so the whoami/binding UI must treat it
+	// the same as "no topic binding".
+	const topicBound = topicBinding && topicBinding.cwd ? topicBinding : undefined;
 	const lines = [
 		`chat_id: ${chatId}`,
 		`chat_type: ${ctx.chatType}`,
@@ -226,18 +231,18 @@ const cmdWhoami: Handler = async ctx => {
 	if (ctx.chatTitle) lines.push(`chat_title: ${ctx.chatTitle}`);
 	if (threadId !== undefined) lines.push(`thread_id: ${threadId}`);
 	lines.push("");
-	if (topicBinding) {
-		lines.push(`bound to (topic): ${topicBinding.cwd}`);
-		if (topicBinding.label) lines.push(`label: ${topicBinding.label}`);
-		lines.push(`since: ${topicBinding.added_at}`);
+	if (topicBound) {
+		lines.push(`bound to (topic): ${topicBound.cwd}`);
+		if (topicBound.label) lines.push(`label: ${topicBound.label}`);
+		lines.push(`since: ${topicBound.added_at}`);
 	}
 	if (binding && binding.cwd) {
-		const tag = topicBinding ? "group default" : "bound to (group)";
+		const tag = topicBound ? "group default" : "bound to (group)";
 		lines.push(`${tag}: ${binding.cwd}`);
 		if (binding.label) lines.push(`label: ${binding.label}`);
-		if (!topicBinding) lines.push(`since: ${binding.added_at}`);
+		if (!topicBound) lines.push(`since: ${binding.added_at}`);
 	}
-	if (!topicBinding && !(binding && binding.cwd)) {
+	if (!topicBound && !(binding && binding.cwd)) {
 		lines.push(`no binding — uses default cwd: ${defaultCwd}`);
 		lines.push(threadId !== undefined
 			? `bind this topic: /bind <path>`
@@ -252,9 +257,18 @@ const cmdBinding: Handler = async ctx => {
 	const topicBinding = threadId !== undefined
 		? registry.getTopicBinding(chatId, threadId)
 		: undefined;
+	// See cmdWhoami: null-cwd topics are pin-only stubs, invisible to UI.
+	const topicBound = topicBinding && topicBinding.cwd ? topicBinding : undefined;
 	const hasGroup = !!(binding && binding.cwd);
-	const topicIds = registry.topicBindingIds(chatId);
-	if (!topicBinding && !hasGroup && topicIds.length === 0) {
+	const allTopicIds = registry.topicBindingIds(chatId);
+	// Filter out pin-only topics from the configured-topics list — they
+	// were never `/bind`'d so listing them surfaces a phantom entry the
+	// user didn't create.
+	const topicIds = allTopicIds.filter(tid => {
+		const t = registry.getTopicBinding(chatId, tid);
+		return !!(t && t.cwd);
+	});
+	if (!topicBound && !hasGroup && topicIds.length === 0) {
 		await ctx.reply(
 			`no binding for chat ${chatId}${threadId !== undefined ? ` topic ${threadId}` : ""}\nfalls back to default: ${defaultCwd}`,
 		);
@@ -263,10 +277,10 @@ const cmdBinding: Handler = async ctx => {
 	const lines = [`chat_id: ${chatId}`];
 	if (threadId !== undefined) lines.push(`thread_id: ${threadId}`);
 	lines.push("");
-	if (topicBinding) {
-		lines.push(`topic ${threadId} cwd: ${topicBinding.cwd}`);
-		if (topicBinding.label) lines.push(`  label: ${topicBinding.label}`);
-		lines.push(`  added: ${topicBinding.added_at}`);
+	if (topicBound) {
+		lines.push(`topic ${threadId} cwd: ${topicBound.cwd}`);
+		if (topicBound.label) lines.push(`  label: ${topicBound.label}`);
+		lines.push(`  added: ${topicBound.added_at}`);
 	}
 	if (hasGroup) {
 		lines.push(`group cwd: ${binding!.cwd}`);

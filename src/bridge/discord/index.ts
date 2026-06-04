@@ -140,6 +140,7 @@ export async function resolveSendTarget(
 
 export class DiscordBridge implements Bridge {
 	readonly kind = "discord" as const;
+	readonly pinsSessions = true;
 	private readonly transports = new Map<string, DiscordTransport>();
 
 	constructor(private readonly client: Client) {}

@@ -80,6 +80,14 @@ export interface Bridge {
 	 *  / text-reply resolution depend on the per-route `pending()` slot
 	 *  surviving between turns. */
 	open(route: SessionRoute): SessionTransport;
+	/** True when this bridge wants per-thread session pinning: each
+	 *  thread's ChatSession is tied to a specific OMP session id stored
+	 *  in the topic binding, so bot restarts resume that conversation
+	 *  rather than the newest session in the cwd (which would mash
+	 *  unrelated threads together). Discord sets true; Telegram + Web
+	 *  default to false because their UX is "one chat = one session,
+	 *  newest wins". */
+	readonly pinsSessions: boolean;
 	dispose(): Promise<void>;
 }
 

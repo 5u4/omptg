@@ -146,6 +146,7 @@ export interface WebBridgeOptions {
 
 export class WebBridge implements Bridge {
 	readonly kind = "web" as const;
+	readonly pinsSessions = false;
 
 	private readonly defaultCwd: string;
 	private readonly stateFile: string;
