@@ -201,6 +201,7 @@ class TelegramTransport implements SessionTransport {
 
 export class TelegramBridge implements Bridge {
 	readonly kind = "telegram" as const;
+	readonly pinsSessions = false;
 	private readonly transports = new Map<string, TelegramTransport>();
 
 	constructor(private readonly bot: Bot) {}

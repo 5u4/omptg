@@ -411,3 +411,72 @@ describe("ChatStore — cross-process merge", () => {
 		expect(reader.get("tg:2")?.cwd).toBe("/a2");
 	});
 });
+
+describe("ChatStore — setTopicSession (per-thread session pinning)", () => {
+	test("creates a topic with null cwd when none exists, persisting sessionId", () => {
+		const s1 = new ChatStore(storePath);
+		s1.setTopicSession("dc:111", "9999", "sess-abc");
+
+		const s2 = new ChatStore(storePath);
+		const t = s2.getTopic("dc:111", "9999");
+		expect(t?.cwd).toBeNull();
+		expect(t?.sessionId).toBe("sess-abc");
+	});
+
+	test("updates sessionId on an existing /bind topic without touching cwd / label", () => {
+		const s = new ChatStore(storePath);
+		s.setTopic("dc:111", "9999", { cwd: "/project", label: "thread-A" });
+		s.setTopicSession("dc:111", "9999", "sess-xyz");
+
+		const t = s.getTopic("dc:111", "9999");
+		expect(t?.cwd).toBe("/project");
+		expect(t?.label).toBe("thread-A");
+		expect(t?.sessionId).toBe("sess-xyz");
+	});
+
+	test("repointing a pin overwrites the previous id", () => {
+		const s = new ChatStore(storePath);
+		s.setTopicSession("dc:111", "9999", "sess-first");
+		s.setTopicSession("dc:111", "9999", "sess-second");
+		expect(s.getTopic("dc:111", "9999")?.sessionId).toBe("sess-second");
+	});
+
+	test("session-pin-only topic with null cwd does not poison resolveCwd", () => {
+		const s = new ChatStore(storePath);
+		s.set("dc:111", { cwd: "/group-cwd" });
+		s.setTopicSession("dc:111", "9999", "sess-abc");
+		// Topic has cwd:null, so resolution must fall through to group.
+		expect(s.resolveCwd("dc:111", "9999")).toBe("/group-cwd");
+	});
+
+	test("two threads under same chat get independent pins", () => {
+		const s = new ChatStore(storePath);
+		s.setTopicSession("dc:111", "9999", "sess-a");
+		s.setTopicSession("dc:111", "8888", "sess-b");
+		expect(s.getTopic("dc:111", "9999")?.sessionId).toBe("sess-a");
+		expect(s.getTopic("dc:111", "8888")?.sessionId).toBe("sess-b");
+	});
+
+	test("setTopic (/bind) preserves a prior sessionId pin", () => {
+		// Regression: ChatSession.attach() pins a sessionId on first
+		// turn; the user then /bind's the thread to a real cwd. The
+		// /bind path goes through setTopic which previously dropped
+		// every field not in the {cwd,label} payload, orphaning the
+		// in-flight session across a bot restart.
+		const s = new ChatStore(storePath);
+		s.setTopicSession("dc:111", "9999", "sess-A");
+		s.setTopic("dc:111", "9999", { cwd: "/proj", label: "thread-A" });
+
+		const t = s.getTopic("dc:111", "9999");
+		expect(t?.cwd).toBe("/proj");
+		expect(t?.label).toBe("thread-A");
+		expect(t?.sessionId).toBe("sess-A");
+	});
+
+	test("setTopic with explicit sessionId overrides prior pin", () => {
+		const s = new ChatStore(storePath);
+		s.setTopicSession("dc:111", "9999", "sess-A");
+		s.setTopic("dc:111", "9999", { cwd: "/proj", sessionId: "sess-B" });
+		expect(s.getTopic("dc:111", "9999")?.sessionId).toBe("sess-B");
+	});
+});

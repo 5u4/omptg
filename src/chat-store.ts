@@ -53,9 +53,22 @@ import { homedir } from "node:os";
 import { dirname, resolve as resolvePath } from "node:path";
 
 export interface TopicBinding {
-	cwd: string;
+	/** May be `null` when a session-pin-only topic exists with no
+	 *  explicit `/bind` cwd. Topic resolution then falls through to
+	 *  the group / default cwd, matching the un-pinned behavior. */
+	cwd: string | null;
 	label?: string;
 	added_at: string;
+	/** Pinned OMP session id for this thread. Set by bridges that want
+	 *  a thread to keep resuming the *same* session across bot restarts
+	 *  (Discord — every thread is one conversation; without pinning, all
+	 *  threads in the same cwd would auto-resume to whichever session
+	 *  happens to be newest on disk). Repointed by `ChatSession.attach()`
+	 *  on every fresh / resumed / auto-resumed session (so `/new`,
+	 *  `/resume`, and successful pin-hit cold-starts all keep it in
+	 *  sync). Absent for Telegram-style bindings where cwd-level
+	 *  newest-wins resume is the desired UX. */
+	sessionId?: string;
 }
 
 export interface ChatBinding {
@@ -311,10 +324,40 @@ export class ChatStore {
 		const entry: ChatBinding = existing
 			? { ...existing, topics: { ...(existing.topics ?? {}) } }
 			: { cwd: null, added_at: new Date().toISOString(), topics: {} };
+		const prior = entry.topics![tkey];
 		entry.topics![tkey] = {
+			// Preserve any prior `sessionId` pin — `/bind` flows through
+			// here and only carries cwd/label, so without this spread the
+			// pin set by ChatSession.attach() would be silently dropped.
+			...(prior?.sessionId ? { sessionId: prior.sessionId } : {}),
 			...binding,
 			added_at: binding.added_at ?? new Date().toISOString(),
 		};
+		this.data.chats[key] = entry;
+		this.dirtyKeys.add(key);
+		this.save();
+	}
+
+	/** Update only the pinned OMP `sessionId` for a topic, preserving
+	 *  existing cwd / label. If the topic doesn't exist yet, create one
+	 *  with `cwd: null` (resolution falls through to group / default —
+	 *  identical to the un-pinned case). Used by bridges with
+	 *  `pinsSessions = true` (Discord) to remember which OMP session a
+	 *  given thread belongs to across bot restarts. */
+	setTopicSession(
+		key: string,
+		threadId: number | string,
+		sessionId: string,
+	): void {
+		const tkey = String(threadId);
+		const existing = this.data.chats[key];
+		const entry: ChatBinding = existing
+			? { ...existing, topics: { ...(existing.topics ?? {}) } }
+			: { cwd: null, added_at: new Date().toISOString(), topics: {} };
+		const prior = entry.topics![tkey];
+		entry.topics![tkey] = prior
+			? { ...prior, sessionId }
+			: { cwd: null, added_at: new Date().toISOString(), sessionId };
 		this.data.chats[key] = entry;
 		this.dirtyKeys.add(key);
 		this.save();
@@ -351,7 +394,7 @@ export class ChatStore {
 	): string | undefined {
 		if (threadId !== undefined) {
 			const t = this.getTopic(key, threadId);
-			if (t) return t.cwd;
+			if (t && t.cwd) return t.cwd;
 		}
 		const g = this.get(key);
 		if (g && g.cwd) return g.cwd;
