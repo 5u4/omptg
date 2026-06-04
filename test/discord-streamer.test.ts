@@ -332,6 +332,104 @@ describe("splitMarkdownForDiscord", () => {
 		expect(splitMarkdownForDiscord("")).toEqual([]);
 		expect(splitMarkdownForDiscord("   \n  ")).toEqual([]);
 	});
+
+	test("GFM table is wrapped in a code fence so columns render aligned", () => {
+		const text = [
+			"intro line",
+			"",
+			"| col a | col b |",
+			"| --- | --- |",
+			"| x | y |",
+			"| z | w |",
+			"",
+			"trailer",
+		].join("\n");
+		const out = splitMarkdownForDiscord(text);
+		expect(out.length).toBe(1);
+		const c = out[0]!;
+		// The table got wrapped: a fence opens before the header row and
+		// closes after the last data row.
+		expect(c).toContain("```\n| col a | col b |");
+		expect(c).toContain("| z | w |\n```");
+		// Prose outside the table is untouched.
+		expect(c).toContain("intro line");
+		expect(c).toContain("trailer");
+	});
+
+	test("horizontal rule lines are replaced with em-dash row", () => {
+		const text = "alpha\n\n---\n\nbeta\n\n***\n\ngamma";
+		const out = splitMarkdownForDiscord(text);
+		expect(out.length).toBe(1);
+		expect(out[0]!).not.toContain("\n---\n");
+		expect(out[0]!).not.toContain("\n***\n");
+		expect(out[0]!).toContain("———");
+	});
+
+	test("HR inside fenced code block is preserved verbatim", () => {
+		const text = "```diff\n---\n+++\n```";
+		const out = splitMarkdownForDiscord(text);
+		expect(out[0]!).toContain("---");
+		expect(out[0]!).toContain("+++");
+	});
+
+	test("H4+ headings are demoted to bold", () => {
+		const text = "# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6";
+		const out = splitMarkdownForDiscord(text);
+		const c = out[0]!;
+		// Native H1-H3 stay unchanged.
+		expect(c).toContain("# H1");
+		expect(c).toContain("## H2");
+		expect(c).toContain("### H3");
+		// H4-H6 collapse to bold.
+		expect(c).toContain("**H4**");
+		expect(c).toContain("**H5**");
+		expect(c).toContain("**H6**");
+		expect(c).not.toContain("#### H4");
+	});
+
+	test("image syntax is rewritten to a plain link", () => {
+		const text = "see ![diagram](https://example.com/d.png) for details";
+		const out = splitMarkdownForDiscord(text);
+		expect(out[0]!).toContain("[diagram](https://example.com/d.png)");
+		expect(out[0]!).not.toContain("![");
+	});
+
+	test("image with empty alt falls back to bare URL", () => {
+		const text = "![](https://example.com/x.png)";
+		const out = splitMarkdownForDiscord(text);
+		expect(out[0]!).toBe("https://example.com/x.png");
+	});
+
+	test("task list checkboxes are rewritten to unicode boxes", () => {
+		const text = "- [ ] todo one\n- [x] done two\n- [X] done three\n1. [ ] ordered";
+		const out = splitMarkdownForDiscord(text);
+		const c = out[0]!;
+		expect(c).toContain("- ☐ todo one");
+		expect(c).toContain("- ☑ done two");
+		expect(c).toContain("- ☑ done three");
+		expect(c).toContain("1. ☐ ordered");
+		expect(c).not.toContain("[ ]");
+		expect(c).not.toContain("[x]");
+	});
+
+	test("fence-aware rewrites leave code content untouched", () => {
+		const text = "```md\n#### still a heading\n- [ ] still a task\n![img](u)\n```";
+		const out = splitMarkdownForDiscord(text);
+		const c = out[0]!;
+		expect(c).toContain("#### still a heading");
+		expect(c).toContain("- [ ] still a task");
+		expect(c).toContain("![img](u)");
+	});
+
+	test("GFM table quoted inside an existing code fence is NOT re-wrapped", () => {
+		const text = "```md\n| a | b |\n| - | - |\n| c | d |\n```";
+		const out = splitMarkdownForDiscord(text);
+		expect(out.length).toBe(1);
+		const c = out[0]!;
+		// Exactly one fence pair — no nested re-wrap.
+		expect(c.match(/```/g)?.length).toBe(2);
+		expect(c).toBe(text);
+	});
 });
 
 describe("DiscordStreamer mention safety + target caching", () => {

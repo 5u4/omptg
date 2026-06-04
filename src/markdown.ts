@@ -37,25 +37,41 @@ const FENCE_RE = /^ {0,3}```(.*)$/;
  * 400. Wrapping in ``` makes them safe AND keeps column alignment so
  * the user can still read the table.
  */
-function fenceTables(src: string): string {
+export function fenceTables(src: string): string {
 	const lines = src.split("\n");
 	const out: string[] = [];
 	let i = 0;
+	let inFence = false;
 	while (i < lines.length) {
-		const header = lines[i];
+		const header = lines[i]!;
+		// Track triple-backtick fence state and copy fence chrome / inner
+		// lines through verbatim. Without this, a table-shaped line pair
+		// quoted inside an existing ```md example gets re-wrapped, which
+		// nests fences and breaks the original block.
+		if (FENCE_RE.test(header)) {
+			inFence = !inFence;
+			out.push(header);
+			i++;
+			continue;
+		}
+		if (inFence) {
+			out.push(header);
+			i++;
+			continue;
+		}
 		const sep = lines[i + 1];
 		const isTableStart =
-			header !== undefined && sep !== undefined
+			sep !== undefined
 			&& /^\s*\|.*\|\s*$/.test(header)
 			&& /^\s*\|?\s*:?-{2,}:?(\s*\|\s*:?-{2,}:?)+\s*\|?\s*$/.test(sep);
 		if (!isTableStart) {
-			out.push(header!);
+			out.push(header);
 			i++;
 			continue;
 		}
 		// Collect header + sep + every following row that still looks like
 		// a table row ("|...|"). Blank line or non-row ends the table.
-		const block: string[] = [header!, sep!];
+		const block: string[] = [header, sep];
 		i += 2;
 		while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i]!)) {
 			block.push(lines[i]!);
@@ -77,7 +93,7 @@ function fenceTables(src: string): string {
  * post-escape (would mangle legitimate `\-` already in the converter
  * output), so neutralize at the source.
  */
-function neutralizeHorizontalRules(src: string): string {
+export function neutralizeHorizontalRules(src: string): string {
 	// Skip inside triple-backtick fenced blocks: telegram accepts `---`
 	// literal inside a fence (the chars are code content, not parsed as
 	// reserved), so rewriting would silently mangle legitimate code
