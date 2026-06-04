@@ -361,21 +361,32 @@ describe("ChatStore — cross-process merge", () => {
 		expect(reader.get("dc:42")?.cwd).toBe("/b");
 	});
 
-	test("delete survives concurrent reader's writeback (tombstone)", () => {
-		// A boots holding {tg:1}. B boots, sees {tg:1}, deletes it.
-		// A then writes {tg:2}. A's in-memory snapshot still has tg:1,
-		// but the tombstone path on B already ran. Cross-process merge
-		// can't revive a deletion the other process made *after* our
-		// load — same hazard remains — so this test instead verifies
-		// the local-tombstone behavior: a process's own delete is
-		// never undone by its own subsequent save's merge step.
-		const s = new ChatStore(storePath);
-		s.set("tg:1", { cwd: "/a" });
-		s.set("dc:2", { cwd: "/b" });
-		s.delete("tg:1");
-		s.set("tg:3", { cwd: "/c" });
+	test("delete tombstone survives another process writing the key back to disk", () => {
+		// Real-world hazard: process A holds {tg:1, dc:2}. A deletes
+		// tg:1. Meanwhile process B (which still has tg:1 in its stale
+		// in-memory snapshot) writes back, restoring tg:1 on disk.
+		// When A next saves (e.g. for an unrelated /bind), its merge
+		// step sees tg:1 on disk again — the tombstone is what prevents
+		// the resurrected entry from being adopted back into A's data.
+		const a = new ChatStore(storePath);
+		a.set("tg:1", { cwd: "/a" });
+		a.set("dc:2", { cwd: "/b" });
+		a.delete("tg:1");
+
+		// Simulate process B writing back its stale view (which still
+		// contained tg:1) — direct on-disk mutation, bypassing any
+		// ChatStore instance, is the cleanest way to model "another
+		// process wrote this file between our delete and our next save".
+		const current = JSON.parse(readFileSync(storePath, "utf8"));
+		current.chats["tg:1"] = { cwd: "/resurrected", added_at: "2024-01-01T00:00:00.000Z" };
+		writeFileSync(storePath, JSON.stringify(current));
+
+		// A's next write must merge the on-disk state, but the
+		// tombstone for tg:1 must veto re-adoption.
+		a.set("tg:3", { cwd: "/c" });
 
 		const reader = new ChatStore(storePath);
 		expect(reader.chatIds().sort()).toEqual(["dc:2", "tg:3"]);
+		expect(reader.get("tg:1")).toBeUndefined();
 	});
 });

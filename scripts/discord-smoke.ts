@@ -45,13 +45,21 @@ function required(key: string): string {
 	return v;
 }
 
+function parsePositiveInt(key: string, raw: string): number {
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n <= 0) {
+		console.error(`${key} must be a positive number, got ${JSON.stringify(raw)}`);
+		process.exit(2);
+	}
+	return n;
+}
+
 const TOKEN = required("DISCORD_SMOKE_TOKEN");
 const GUILD_ID = required("DISCORD_SMOKE_GUILD_ID");
 const CHANNEL_ID = required("DISCORD_SMOKE_CHANNEL_ID");
 const BOT_ID = required("DISCORD_SMOKE_BOT_ID");
 const PROMPT = process.env.DISCORD_SMOKE_PROMPT ?? "ping (smoke)";
-const TIMEOUT_MS = Number(process.env.DISCORD_SMOKE_TIMEOUT_MS ?? "120000");
-
+const TIMEOUT_MS = parsePositiveInt("DISCORD_SMOKE_TIMEOUT_MS", process.env.DISCORD_SMOKE_TIMEOUT_MS ?? "120000");
 const nonce = Math.random().toString(36).slice(2, 8);
 const promptText = `${PROMPT} [${nonce}]`;
 

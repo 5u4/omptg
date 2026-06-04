@@ -88,11 +88,7 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 			// the thread spawn instead. Reply to the original message so
 			// the user sees the explanation in the parent channel.
 			if (!msg.content.trim()) {
-				try {
-					await msg.reply("ℹ attachments aren't supported yet — please add a text message describing what you'd like.");
-				} catch (err) {
-					log.warn("attachment_only.reply_failed", { err: String(err) });
-				}
+				await refuseAttachmentOnly(msg);
 				return;
 			}
 
@@ -108,10 +104,14 @@ export function installDiscordMessageHandler(opts: DiscordHandlerOptions): void 
 	 *  materialize the per-thread ChatSession, and hand off to runTurn. */
 	async function dispatch(msg: Message, channelId: string, threadId: string): Promise<void> {
 		const userText = msg.content;
-		// In-thread guard: same attachment-only logic, but here we don't
-		// own thread creation so we just decline politely without
-		// spawning a turn. Top-level path above blocks earlier.
-		if (!userText.trim()) return;
+		// In-thread guard: same attachment-only logic as the top-level
+		// branch. We don't own thread creation here, so we just decline
+		// without spawning a turn — but still surface the explanation so
+		// the user understands why the bot went quiet in the thread.
+		if (!userText.trim()) {
+			await refuseAttachmentOnly(msg);
+			return;
+		}
 
 		let prompt = userText;
 		const refId = msg.reference?.messageId;
@@ -158,5 +158,21 @@ async function spawnOrRecoverThread(msg: Message, name: string): Promise<ThreadC
 		const refreshed = await msg.fetch();
 		if (!refreshed.thread) throw err;
 		return refreshed.thread;
+	}
+}
+
+/** Post the "attachments not supported yet" reply with mentions fully
+ *  suppressed. Matches the convention used everywhere else in the
+ *  Discord bridge (streamer / ui / system messages): user text and
+ *  reply context can contain `@everyone`, `<@id>`, etc., and a system
+ *  notice has no business re-pinging the user it's replying to. */
+async function refuseAttachmentOnly(msg: Message): Promise<void> {
+	try {
+		await msg.reply({
+			content: "ℹ attachments aren't supported yet — please add a text message describing what you'd like.",
+			allowedMentions: { parse: [], repliedUser: false },
+		});
+	} catch (err) {
+		log.warn("attachment_only.reply_failed", { err: String(err) });
 	}
 }
